@@ -12,6 +12,7 @@ import (
 type engine interface {
 	Info(context.Context, client.InfoOptions) (client.SystemInfoResult, error)
 	NodeList(context.Context, client.NodeListOptions) (client.NodeListResult, error)
+	ServiceList(context.Context, client.ServiceListOptions) (client.ServiceListResult, error)
 	DaemonHost() string
 }
 
@@ -76,6 +77,41 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 	}
 	sort.Slice(result.Nodes, func(a, b int) bool {
 		return result.Nodes[a].Hostname < result.Nodes[b].Hostname
+	})
+
+	serviceResponse, err := i.engine.ServiceList(ctx, client.ServiceListOptions{Status: true})
+	if err != nil {
+		return status.Result{}, fmt.Errorf("query Swarm services at %q: %w", i.endpoint, err)
+	}
+	for _, service := range serviceResponse.Items {
+		if service.ServiceStatus == nil {
+			return status.Result{}, fmt.Errorf("query Swarm services at %q: service %q has no task counts", i.endpoint, service.Spec.Name)
+		}
+		mode := "unknown"
+		switch {
+		case service.Spec.Mode.Replicated != nil:
+			mode = "replicated"
+		case service.Spec.Mode.Global != nil:
+			mode = "global"
+		case service.Spec.Mode.ReplicatedJob != nil:
+			mode = "replicated-job"
+		case service.Spec.Mode.GlobalJob != nil:
+			mode = "global-job"
+		}
+		result.Services = append(result.Services, status.Service{
+			ID:           service.ID,
+			Name:         service.Spec.Name,
+			Mode:         mode,
+			RunningTasks: service.ServiceStatus.RunningTasks,
+			DesiredTasks: service.ServiceStatus.DesiredTasks,
+			Converged:    service.ServiceStatus.RunningTasks == service.ServiceStatus.DesiredTasks,
+		})
+	}
+	sort.Slice(result.Services, func(a, b int) bool {
+		if result.Services[a].Converged != result.Services[b].Converged {
+			return !result.Services[a].Converged
+		}
+		return result.Services[a].Name < result.Services[b].Name
 	})
 	return result, nil
 }

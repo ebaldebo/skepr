@@ -16,7 +16,8 @@ func TestStatusPrintsClusterSummary(t *testing.T) {
 	exitCode := Run(context.Background(), []string{"status"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, 0, exitCode)
-	assert.Equal(t, `Cluster: cluster-1
+	assert.Equal(t, `UNSAFE: service database has 0/1 running tasks
+Cluster: cluster-1
 Endpoint: unix:///var/run/docker.sock
 Swarm: active
 Control: available
@@ -26,6 +27,11 @@ Nodes:
   manager-1  m1  manager  ready  active  leader
   manager-2  m2  manager  ready  active  reachable
   worker-1   w1  worker   ready  active
+
+Services:
+  database  s2  replicated  0/1  unconverged
+  agent     s3  global      3/3  converged
+  api       s1  replicated  2/2  converged
 `, stdout.String())
 }
 
@@ -69,6 +75,32 @@ func TestStatusJSONOutput(t *testing.T) {
       "state": "ready",
       "availability": "active"
     }
+  ],
+  "services": [
+    {
+      "id": "s2",
+      "name": "database",
+      "mode": "replicated",
+      "running_tasks": 0,
+      "desired_tasks": 1,
+      "converged": false
+    },
+    {
+      "id": "s3",
+      "name": "agent",
+      "mode": "global",
+      "running_tasks": 3,
+      "desired_tasks": 3,
+      "converged": true
+    },
+    {
+      "id": "s1",
+      "name": "api",
+      "mode": "replicated",
+      "running_tasks": 2,
+      "desired_tasks": 2,
+      "converged": true
+    }
   ]
 }`, stdout.String())
 	assert.Equal(t, `{
@@ -103,6 +135,32 @@ func TestStatusJSONOutput(t *testing.T) {
       "role": "worker",
       "state": "ready",
       "availability": "active"
+    }
+  ],
+  "services": [
+    {
+      "id": "s2",
+      "name": "database",
+      "mode": "replicated",
+      "running_tasks": 0,
+      "desired_tasks": 1,
+      "converged": false
+    },
+    {
+      "id": "s3",
+      "name": "agent",
+      "mode": "global",
+      "running_tasks": 3,
+      "desired_tasks": 3,
+      "converged": true
+    },
+    {
+      "id": "s1",
+      "name": "api",
+      "mode": "replicated",
+      "running_tasks": 2,
+      "desired_tasks": 2,
+      "converged": true
     }
   ]
 }
@@ -158,6 +216,11 @@ func (fakeInspector) Inspect(context.Context) (status.Result, error) {
 			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
 			{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
 			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+		},
+		Services: []status.Service{
+			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false},
+			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 3, DesiredTasks: 3, Converged: true},
+			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
 		},
 	}, nil
 }

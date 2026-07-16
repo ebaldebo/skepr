@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/ebaldebo/skepr/internal/status"
@@ -44,6 +45,32 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 				ManagerStatus: &swarm.ManagerStatus{Leader: true, Reachability: swarm.ReachabilityReachable},
 			},
 		},
+		services: []swarm.Service{
+			{
+				ID: "s1",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "api"},
+					Mode:        swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: uint64Pointer(2)}},
+				},
+				ServiceStatus: &swarm.ServiceStatus{RunningTasks: 2, DesiredTasks: 2},
+			},
+			{
+				ID: "s3",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "agent"},
+					Mode:        swarm.ServiceMode{Global: &swarm.GlobalService{}},
+				},
+				ServiceStatus: &swarm.ServiceStatus{RunningTasks: 3, DesiredTasks: 3},
+			},
+			{
+				ID: "s2",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "database"},
+					Mode:        swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: uint64Pointer(1)}},
+				},
+				ServiceStatus: &swarm.ServiceStatus{RunningTasks: 0, DesiredTasks: 1},
+			},
+		},
 	})
 
 	result, err := inspector.Inspect(context.Background())
@@ -63,17 +90,53 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 			{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
 			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
 		},
+		Services: []status.Service{
+			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false},
+			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 3, DesiredTasks: 3, Converged: true},
+			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+		},
 	}, result)
 }
 
+func TestInspectorRejectsServiceWithoutTaskCounts(t *testing.T) {
+	t.Parallel()
+
+	inspector := newInspector(fakeEngine{
+		host: "unix:///var/run/docker.sock",
+		info: system.Info{Swarm: swarm.Info{
+			LocalNodeState:   swarm.LocalNodeStateActive,
+			ControlAvailable: true,
+		}},
+		services: []swarm.Service{{
+			ID: "s1",
+			Spec: swarm.ServiceSpec{
+				Annotations: swarm.Annotations{Name: "api"},
+				Mode:        swarm.ServiceMode{Replicated: &swarm.ReplicatedService{}},
+			},
+		}},
+	})
+
+	_, err := inspector.Inspect(context.Background())
+
+	require.EqualError(t, err, `query Swarm services at "unix:///var/run/docker.sock": service "api" has no task counts`)
+}
+
 type fakeEngine struct {
-	host  string
-	info  system.Info
-	nodes []swarm.Node
+	host     string
+	info     system.Info
+	nodes    []swarm.Node
+	services []swarm.Service
 }
 
 func (f fakeEngine) NodeList(context.Context, client.NodeListOptions) (client.NodeListResult, error) {
 	return client.NodeListResult{Items: f.nodes}, nil
+}
+
+func (f fakeEngine) ServiceList(_ context.Context, options client.ServiceListOptions) (client.ServiceListResult, error) {
+	if !options.Status {
+		return client.ServiceListResult{}, errors.New("service status was not requested")
+	}
+	return client.ServiceListResult{Items: f.services}, nil
 }
 
 func (f fakeEngine) Info(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
@@ -82,4 +145,8 @@ func (f fakeEngine) Info(context.Context, client.InfoOptions) (client.SystemInfo
 
 func (f fakeEngine) DaemonHost() string {
 	return f.host
+}
+
+func uint64Pointer(value uint64) *uint64 {
+	return &value
 }

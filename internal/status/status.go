@@ -22,12 +22,22 @@ type Node struct {
 	ManagerStatus string `json:"manager_status,omitempty"`
 }
 
+type Service struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Mode         string `json:"mode"`
+	RunningTasks uint64 `json:"running_tasks"`
+	DesiredTasks uint64 `json:"desired_tasks"`
+	Converged    bool   `json:"converged"`
+}
+
 type Result struct {
-	SchemaVersion int     `json:"schema_version"`
-	Endpoint      string  `json:"endpoint"`
-	Cluster       Cluster `json:"cluster"`
-	Leader        string  `json:"leader,omitempty"`
-	Nodes         []Node  `json:"nodes,omitempty"`
+	SchemaVersion int       `json:"schema_version"`
+	Endpoint      string    `json:"endpoint"`
+	Cluster       Cluster   `json:"cluster"`
+	Leader        string    `json:"leader,omitempty"`
+	Nodes         []Node    `json:"nodes,omitempty"`
+	Services      []Service `json:"services,omitempty"`
 }
 
 type Inspector interface {

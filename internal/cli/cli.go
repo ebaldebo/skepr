@@ -66,6 +66,11 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 	}
 
 	var output strings.Builder
+	for _, service := range result.Services {
+		if !service.Converged {
+			_, _ = fmt.Fprintf(&output, "UNSAFE: service %s has %d/%d running tasks\n", service.Name, service.RunningTasks, service.DesiredTasks)
+		}
+	}
 	control := "unavailable"
 	if result.Cluster.ControlAvailable {
 		control = "available"
@@ -91,6 +96,27 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 				_, _ = fmt.Fprintf(table, "\t%s", node.ManagerStatus)
 			}
 			_, _ = fmt.Fprintln(table)
+		}
+		_ = table.Flush()
+	}
+	if len(result.Services) > 0 {
+		output.WriteString("\nServices:\n")
+		table := tabwriter.NewWriter(&output, 0, 2, 2, ' ', 0)
+		for _, service := range result.Services {
+			convergence := "unconverged"
+			if service.Converged {
+				convergence = "converged"
+			}
+			_, _ = fmt.Fprintf(
+				table,
+				"  %s\t%s\t%s\t%d/%d\t%s\n",
+				service.Name,
+				service.ID,
+				service.Mode,
+				service.RunningTasks,
+				service.DesiredTasks,
+				convergence,
+			)
 		}
 		_ = table.Flush()
 	}
