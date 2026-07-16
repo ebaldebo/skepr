@@ -16,7 +16,17 @@ func TestStatusPrintsClusterSummary(t *testing.T) {
 	exitCode := Run(context.Background(), []string{"status"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, 0, exitCode)
-	assert.Equal(t, "Cluster: cluster-1\nEndpoint: unix:///var/run/docker.sock\nSwarm: active\nControl: available\n", stdout.String())
+	assert.Equal(t, `Cluster: cluster-1
+Endpoint: unix:///var/run/docker.sock
+Swarm: active
+Control: available
+Leader: manager-1
+
+Nodes:
+  manager-1  m1  manager  ready  active  leader
+  manager-2  m2  manager  ready  active  reachable
+  worker-1   w1  worker   ready  active
+`, stdout.String())
 }
 
 func TestStatusJSONOutput(t *testing.T) {
@@ -33,7 +43,33 @@ func TestStatusJSONOutput(t *testing.T) {
     "id": "cluster-1",
     "local_state": "active",
     "control_available": true
-  }
+  },
+  "leader": "manager-1",
+  "nodes": [
+    {
+      "id": "m1",
+      "hostname": "manager-1",
+      "role": "manager",
+      "state": "ready",
+      "availability": "active",
+      "manager_status": "leader"
+    },
+    {
+      "id": "m2",
+      "hostname": "manager-2",
+      "role": "manager",
+      "state": "ready",
+      "availability": "active",
+      "manager_status": "reachable"
+    },
+    {
+      "id": "w1",
+      "hostname": "worker-1",
+      "role": "worker",
+      "state": "ready",
+      "availability": "active"
+    }
+  ]
 }`, stdout.String())
 	assert.Equal(t, `{
   "schema_version": 1,
@@ -42,7 +78,33 @@ func TestStatusJSONOutput(t *testing.T) {
     "id": "cluster-1",
     "local_state": "active",
     "control_available": true
-  }
+  },
+  "leader": "manager-1",
+  "nodes": [
+    {
+      "id": "m1",
+      "hostname": "manager-1",
+      "role": "manager",
+      "state": "ready",
+      "availability": "active",
+      "manager_status": "leader"
+    },
+    {
+      "id": "m2",
+      "hostname": "manager-2",
+      "role": "manager",
+      "state": "ready",
+      "availability": "active",
+      "manager_status": "reachable"
+    },
+    {
+      "id": "w1",
+      "hostname": "worker-1",
+      "role": "worker",
+      "state": "ready",
+      "availability": "active"
+    }
+  ]
 }
 `, stdout.String())
 }
@@ -90,6 +152,12 @@ func (fakeInspector) Inspect(context.Context) (status.Result, error) {
 			ID:               "cluster-1",
 			LocalState:       "active",
 			ControlAvailable: true,
+		},
+		Leader: "manager-1",
+		Nodes: []status.Node{
+			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+			{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
 		},
 	}, nil
 }

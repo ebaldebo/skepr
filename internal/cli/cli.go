@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/ebaldebo/skepr/internal/status"
 )
@@ -63,22 +65,36 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 		return ExitSuccess
 	}
 
+	var output strings.Builder
 	control := "unavailable"
 	if result.Cluster.ControlAvailable {
 		control = "available"
 	} else {
-		if _, err := fmt.Fprintln(stdout, "UNSAFE: Swarm control is unavailable"); err != nil {
-			report(stderr, "write status output: %v\n", err)
-			return ExitDockerConnection
-		}
+		output.WriteString("UNSAFE: Swarm control is unavailable\n")
 	}
-	_, err = fmt.Fprintf(
-		stdout, "Cluster: %s\nEndpoint: %s\nSwarm: %s\nControl: %s\n",
+	_, _ = fmt.Fprintf(
+		&output, "Cluster: %s\nEndpoint: %s\nSwarm: %s\nControl: %s\n",
 		result.Cluster.ID,
 		result.Endpoint,
 		result.Cluster.LocalState,
 		control,
 	)
+	if result.Leader != "" {
+		_, _ = fmt.Fprintf(&output, "Leader: %s\n", result.Leader)
+	}
+	if len(result.Nodes) > 0 {
+		output.WriteString("\nNodes:\n")
+		table := tabwriter.NewWriter(&output, 0, 2, 2, ' ', 0)
+		for _, node := range result.Nodes {
+			_, _ = fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s", node.Hostname, node.ID, node.Role, node.State, node.Availability)
+			if node.ManagerStatus != "" {
+				_, _ = fmt.Fprintf(table, "\t%s", node.ManagerStatus)
+			}
+			_, _ = fmt.Fprintln(table)
+		}
+		_ = table.Flush()
+	}
+	_, err = io.WriteString(stdout, output.String())
 	if err != nil {
 		report(stderr, "write status output: %v\n", err)
 		return ExitDockerConnection

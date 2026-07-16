@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/ebaldebo/skepr/internal/status"
 	"github.com/moby/moby/client"
@@ -10,6 +11,7 @@ import (
 
 type engine interface {
 	Info(context.Context, client.InfoOptions) (client.SystemInfoResult, error)
+	NodeList(context.Context, client.NodeListOptions) (client.NodeListResult, error)
 	DaemonHost() string
 }
 
@@ -37,7 +39,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 	if response.Info.Swarm.Cluster != nil {
 		clusterID = response.Info.Swarm.Cluster.ID
 	}
-	return status.Result{
+	result := status.Result{
 		SchemaVersion: status.SchemaVersion,
 		Endpoint:      i.endpoint,
 		Cluster: status.Cluster{
@@ -45,7 +47,37 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			LocalState:       string(response.Info.Swarm.LocalNodeState),
 			ControlAvailable: response.Info.Swarm.ControlAvailable,
 		},
-	}, nil
+	}
+	if !result.Cluster.ControlAvailable {
+		return result, nil
+	}
+
+	nodeResponse, err := i.engine.NodeList(ctx, client.NodeListOptions{})
+	if err != nil {
+		return status.Result{}, fmt.Errorf("query Swarm nodes at %q: %w", i.endpoint, err)
+	}
+	for _, node := range nodeResponse.Items {
+		managerStatus := ""
+		if node.ManagerStatus != nil {
+			managerStatus = string(node.ManagerStatus.Reachability)
+			if node.ManagerStatus.Leader {
+				managerStatus = "leader"
+				result.Leader = node.Description.Hostname
+			}
+		}
+		result.Nodes = append(result.Nodes, status.Node{
+			ID:            node.ID,
+			Hostname:      node.Description.Hostname,
+			Role:          string(node.Spec.Role),
+			State:         string(node.Status.State),
+			Availability:  string(node.Spec.Availability),
+			ManagerStatus: managerStatus,
+		})
+	}
+	sort.Slice(result.Nodes, func(a, b int) bool {
+		return result.Nodes[a].Hostname < result.Nodes[b].Hostname
+	})
+	return result, nil
 }
 
 func (i *Inspector) Close() error {
