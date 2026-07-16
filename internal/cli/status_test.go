@@ -13,7 +13,7 @@ func TestStatusPrintsClusterSummary(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
-	exitCode := Run(context.Background(), []string{"status"}, fakeInspector{}, &stdout, &bytes.Buffer{})
+	exitCode := Run(context.Background(), []string{"status"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, 0, exitCode)
 	assert.Equal(t, "Cluster: cluster-1\nEndpoint: unix:///var/run/docker.sock\nSwarm: active\nControl: available\n", stdout.String())
@@ -23,7 +23,7 @@ func TestStatusJSONOutput(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
-	exitCode := Run(context.Background(), []string{"status", "--json"}, fakeInspector{}, &stdout, &bytes.Buffer{})
+	exitCode := Run(context.Background(), []string{"status", "--json"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, 0, exitCode)
 	assert.JSONEq(t, `{
@@ -51,10 +51,33 @@ func TestStatusPutsUnavailableControlFirst(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
-	exitCode := Run(context.Background(), []string{"status"}, unavailableInspector{}, &stdout, &bytes.Buffer{})
+	exitCode := Run(context.Background(), []string{"status"}, &fakeConnector{connection: unavailableInspector{}}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, 0, exitCode)
 	assert.Equal(t, "UNSAFE: Swarm control is unavailable\nCluster: \nEndpoint: unix:///var/run/docker.sock\nSwarm: inactive\nControl: unavailable\n", stdout.String())
+}
+
+func TestStatusUsesExplicitDockerContext(t *testing.T) {
+	t.Parallel()
+
+	connector := &fakeConnector{}
+	exitCode := Run(context.Background(), []string{"--context", "swarm", "status"}, connector, &bytes.Buffer{}, &bytes.Buffer{})
+
+	assert.Equal(t, 0, exitCode)
+	assert.Equal(t, "swarm", connector.contextName)
+}
+
+type fakeConnector struct {
+	contextName string
+	connection  status.Connection
+}
+
+func (f *fakeConnector) Connect(_ context.Context, contextName string) (status.Connection, error) {
+	f.contextName = contextName
+	if f.connection == nil {
+		f.connection = fakeInspector{}
+	}
+	return f.connection, nil
 }
 
 type fakeInspector struct{}
@@ -71,6 +94,8 @@ func (fakeInspector) Inspect(context.Context) (status.Result, error) {
 	}, nil
 }
 
+func (fakeInspector) Close() error { return nil }
+
 type unavailableInspector struct{}
 
 func (unavailableInspector) Inspect(context.Context) (status.Result, error) {
@@ -80,3 +105,5 @@ func (unavailableInspector) Inspect(context.Context) (status.Result, error) {
 		Cluster:       status.Cluster{LocalState: "inactive"},
 	}, nil
 }
+
+func (unavailableInspector) Close() error { return nil }

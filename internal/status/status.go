@@ -1,6 +1,9 @@
 package status
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 const SchemaVersion = 1
 
@@ -18,4 +21,13 @@ type Result struct {
 
 type Inspector interface {
 	Inspect(context.Context) (Result, error)
+}
+
+type Connection interface {
+	Inspector
+	io.Closer
+}
+
+type Connector interface {
+	Connect(context.Context, string) (Connection, error)
 }

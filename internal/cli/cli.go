@@ -16,9 +16,17 @@ const (
 	ExitDockerConnection = 3
 )
 
-func Run(ctx context.Context, args []string, inspector status.Inspector, stdout, stderr io.Writer) int {
+func Run(ctx context.Context, args []string, connector status.Connector, stdout, stderr io.Writer) int {
+	globalFlags := flag.NewFlagSet("skepr", flag.ContinueOnError)
+	globalFlags.SetOutput(stderr)
+	contextName := globalFlags.String("context", "", "Docker context to use")
+	if err := globalFlags.Parse(args); err != nil {
+		return ExitInvalidUsage
+	}
+	args = globalFlags.Args()
+
 	if len(args) == 0 || args[0] != "status" {
-		report(stderr, "usage: skepr status [--json]\n")
+		report(stderr, "usage: skepr [--context name] status [--json]\n")
 		return ExitInvalidUsage
 	}
 
@@ -27,12 +35,19 @@ func Run(ctx context.Context, args []string, inspector status.Inspector, stdout,
 	jsonOutput := flags.Bool("json", false, "emit JSON output")
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		if err == nil {
-			report(stderr, "usage: skepr status [--json]\n")
+			report(stderr, "usage: skepr [--context name] status [--json]\n")
 		}
 		return ExitInvalidUsage
 	}
 
-	result, err := inspector.Inspect(ctx)
+	connection, err := connector.Connect(ctx, *contextName)
+	if err != nil {
+		report(stderr, "configure Docker connection: %v\n", err)
+		return ExitDockerConnection
+	}
+	defer func() { _ = connection.Close() }()
+
+	result, err := connection.Inspect(ctx)
 	if err != nil {
 		report(stderr, "inspect Docker Swarm: %v\n", err)
 		return ExitDockerConnection
