@@ -45,10 +45,11 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 		result.Findings = append(result.Findings, Finding{
 			Gate:    "target_exists",
 			Level:   LevelPass,
-			Message: fmt.Sprintf("node %s exists", node.Hostname),
+			Message: fmt.Sprintf("target node %s exists with role %s", node.Hostname, node.Role),
 		})
 		result.addStateFinding(node)
 		result.addAvailabilityFinding(node)
+		result.addEndpointFindings(inventory.Cluster)
 		return result
 	}
 
@@ -56,8 +57,9 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 	result.Findings = append(result.Findings, Finding{
 		Gate:    "target_exists",
 		Level:   LevelBlocker,
-		Message: fmt.Sprintf("node %s was not found", requestedNode),
+		Message: fmt.Sprintf("target node %s was not found", requestedNode),
 	})
+	result.addEndpointFindings(inventory.Cluster)
 	return result
 }
 
@@ -65,11 +67,11 @@ func (r *Result) addStateFinding(node status.Node) {
 	finding := Finding{Gate: "target_ready"}
 	if node.State == "ready" {
 		finding.Level = LevelPass
-		finding.Message = fmt.Sprintf("node %s is ready", node.Hostname)
+		finding.Message = fmt.Sprintf("target node %s is ready", node.Hostname)
 	} else {
 		r.Safe = false
 		finding.Level = LevelBlocker
-		finding.Message = fmt.Sprintf("node %s state is %s, expected ready", node.Hostname, node.State)
+		finding.Message = fmt.Sprintf("target node %s state is %s, expected ready", node.Hostname, node.State)
 	}
 	r.Findings = append(r.Findings, finding)
 }
@@ -78,11 +80,35 @@ func (r *Result) addAvailabilityFinding(node status.Node) {
 	finding := Finding{Gate: "target_active"}
 	if node.Availability == "active" {
 		finding.Level = LevelPass
-		finding.Message = fmt.Sprintf("node %s is active", node.Hostname)
+		finding.Message = fmt.Sprintf("target node %s is active", node.Hostname)
 	} else {
 		r.Safe = false
 		finding.Level = LevelBlocker
-		finding.Message = fmt.Sprintf("node %s availability is %s, expected active", node.Hostname, node.Availability)
+		finding.Message = fmt.Sprintf("target node %s availability is %s, expected active", node.Hostname, node.Availability)
 	}
 	r.Findings = append(r.Findings, finding)
+}
+
+func (r *Result) addEndpointFindings(cluster status.Cluster) {
+	stateFinding := Finding{Gate: "swarm_active"}
+	if cluster.LocalState == "active" {
+		stateFinding.Level = LevelPass
+		stateFinding.Message = "connected Docker endpoint is part of an active Swarm"
+	} else {
+		r.Safe = false
+		stateFinding.Level = LevelBlocker
+		stateFinding.Message = fmt.Sprintf("connected Docker endpoint Swarm state is %s, expected active", cluster.LocalState)
+	}
+	r.Findings = append(r.Findings, stateFinding)
+
+	controlFinding := Finding{Gate: "swarm_control_available"}
+	if cluster.ControlAvailable {
+		controlFinding.Level = LevelPass
+		controlFinding.Message = "connected Docker endpoint provides Swarm manager control"
+	} else {
+		r.Safe = false
+		controlFinding.Level = LevelBlocker
+		controlFinding.Message = "connected Docker endpoint does not provide Swarm manager control"
+	}
+	r.Findings = append(r.Findings, controlFinding)
 }

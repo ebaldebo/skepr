@@ -226,10 +226,10 @@ func runCheck(ctx context.Context, args []string, contextName string, connector 
 		if result.Target != nil {
 			targetName = result.Target.Hostname
 		}
-		_, _ = fmt.Fprintf(stdout, "UNSAFE: node %s failed checks\n", targetName)
+		_, _ = fmt.Fprintf(stdout, "UNSAFE: target node %s failed checks\n", targetName)
 		return ExitSafetyGate
 	}
-	_, _ = fmt.Fprintf(stdout, "SAFE: node %s passed checks\n", result.Target.Hostname)
+	_, _ = fmt.Fprintf(stdout, "SAFE: target node %s passed checks\n", result.Target.Hostname)
 	return ExitSuccess
 }
 
