@@ -133,3 +133,56 @@ func TestCheckNodeEndpointGates(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckNodeManagerHealth(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		manager         status.Node
+		expectedSafe    bool
+		expectedFinding Finding
+	}{
+		{
+			name:            "healthy leader",
+			manager:         status.Node{Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+			expectedSafe:    true,
+			expectedFinding: Finding{Gate: "manager_healthy", Level: LevelPass, Message: "Swarm manager manager-1 is healthy (ready, active and leader)"},
+		},
+		{
+			name:            "healthy reachable manager",
+			manager:         status.Node{Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+			expectedSafe:    true,
+			expectedFinding: Finding{Gate: "manager_healthy", Level: LevelPass, Message: "Swarm manager manager-2 is healthy (ready, active and reachable)"},
+		},
+		{
+			name:            "unhealthy manager",
+			manager:         status.Node{Hostname: "manager-2", Role: "manager", State: "down", Availability: "drain", ManagerStatus: "unreachable"},
+			expectedSafe:    false,
+			expectedFinding: Finding{Gate: "manager_healthy", Level: LevelBlocker, Message: "Swarm manager manager-2 is unhealthy: state is down, expected ready; availability is drain, expected active; manager status is unreachable, expected leader or reachable"},
+		},
+		{
+			name:            "manager status unavailable",
+			manager:         status.Node{Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active"},
+			expectedSafe:    false,
+			expectedFinding: Finding{Gate: "manager_healthy", Level: LevelBlocker, Message: "Swarm manager manager-2 is unhealthy: manager status is unavailable, expected leader or reachable"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := CheckNode(status.Result{
+				Cluster: status.Cluster{LocalState: "active", ControlAvailable: true},
+				Nodes: []status.Node{
+					tt.manager,
+					{Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+				},
+			}, "worker-1")
+
+			assert.Equal(t, tt.expectedSafe, result.Safe)
+			assert.Equal(t, tt.expectedFinding, result.Findings[len(result.Findings)-1])
+		})
+	}
+}

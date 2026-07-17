@@ -2,6 +2,7 @@ package preflight
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ebaldebo/skepr/internal/status"
 )
@@ -50,6 +51,7 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 		result.addStateFinding(node)
 		result.addAvailabilityFinding(node)
 		result.addEndpointFindings(inventory.Cluster)
+		result.addManagerFindings(inventory.Nodes)
 		return result
 	}
 
@@ -60,6 +62,7 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 		Message: fmt.Sprintf("target node %s was not found", requestedNode),
 	})
 	result.addEndpointFindings(inventory.Cluster)
+	result.addManagerFindings(inventory.Nodes)
 	return result
 }
 
@@ -111,4 +114,38 @@ func (r *Result) addEndpointFindings(cluster status.Cluster) {
 		controlFinding.Message = "connected Docker endpoint does not provide Swarm manager control"
 	}
 	r.Findings = append(r.Findings, controlFinding)
+}
+
+func (r *Result) addManagerFindings(nodes []status.Node) {
+	for _, node := range nodes {
+		if node.Role != "manager" {
+			continue
+		}
+
+		var issues []string
+		if node.State != "ready" {
+			issues = append(issues, fmt.Sprintf("state is %s, expected ready", node.State))
+		}
+		if node.Availability != "active" {
+			issues = append(issues, fmt.Sprintf("availability is %s, expected active", node.Availability))
+		}
+		if node.ManagerStatus != "leader" && node.ManagerStatus != "reachable" {
+			managerStatus := node.ManagerStatus
+			if managerStatus == "" {
+				managerStatus = "unavailable"
+			}
+			issues = append(issues, fmt.Sprintf("manager status is %s, expected leader or reachable", managerStatus))
+		}
+
+		finding := Finding{Gate: "manager_healthy"}
+		if len(issues) == 0 {
+			finding.Level = LevelPass
+			finding.Message = fmt.Sprintf("Swarm manager %s is healthy (ready, active and %s)", node.Hostname, node.ManagerStatus)
+		} else {
+			r.Safe = false
+			finding.Level = LevelBlocker
+			finding.Message = fmt.Sprintf("Swarm manager %s is unhealthy: %s", node.Hostname, strings.Join(issues, "; "))
+		}
+		r.Findings = append(r.Findings, finding)
+	}
 }

@@ -21,6 +21,8 @@ PASS: target node worker-1 is ready
 PASS: target node worker-1 is active
 PASS: connected Docker endpoint is part of an active Swarm
 PASS: connected Docker endpoint provides Swarm manager control
+PASS: Swarm manager manager-1 is healthy (ready, active and leader)
+PASS: Swarm manager manager-2 is healthy (ready, active and reachable)
 SAFE: target node worker-1 passed checks
 `, stdout.String())
 }
@@ -73,6 +75,34 @@ UNSAFE: target node worker-1 failed checks
 `, stdout.String())
 }
 
+func TestCheckBlocksUnhealthySwarmManager(t *testing.T) {
+	t.Parallel()
+
+	connection := checkInspector{result: status.Result{
+		SchemaVersion: status.SchemaVersion,
+		Endpoint:      "unix:///var/run/docker.sock",
+		Cluster:       status.Cluster{LocalState: "active", ControlAvailable: true},
+		Nodes: []status.Node{
+			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+			{ID: "m2", Hostname: "manager-2", Role: "manager", State: "down", Availability: "drain", ManagerStatus: "unreachable"},
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+		},
+	}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"check", "worker-1"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `BLOCKER: Swarm manager manager-2 is unhealthy: state is down, expected ready; availability is drain, expected active; manager status is unreachable, expected leader or reachable
+PASS: target node worker-1 exists with role worker
+PASS: target node worker-1 is ready
+PASS: target node worker-1 is active
+PASS: connected Docker endpoint is part of an active Swarm
+PASS: connected Docker endpoint provides Swarm manager control
+PASS: Swarm manager manager-1 is healthy (ready, active and leader)
+UNSAFE: target node worker-1 failed checks
+`, stdout.String())
+}
+
 func TestCheckJSONOutput(t *testing.T) {
 	t.Parallel()
 
@@ -117,6 +147,16 @@ func TestCheckJSONOutput(t *testing.T) {
       "gate": "swarm_control_available",
       "level": "pass",
       "message": "connected Docker endpoint provides Swarm manager control"
+    },
+    {
+      "gate": "manager_healthy",
+      "level": "pass",
+      "message": "Swarm manager manager-1 is healthy (ready, active and leader)"
+    },
+    {
+      "gate": "manager_healthy",
+      "level": "pass",
+      "message": "Swarm manager manager-2 is healthy (ready, active and reachable)"
     }
   ]
 }
