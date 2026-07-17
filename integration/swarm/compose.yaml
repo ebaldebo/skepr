@@ -1,0 +1,67 @@
+name: skepr-integration
+
+x-node: &node
+  image: docker:29.6.1-dind
+  privileged: true
+  restart: "no"
+  environment:
+    DOCKER_TLS_CERTDIR: ""
+  command:
+    - --host=unix:///var/run/docker.sock
+    - --host=tcp://0.0.0.0:2375
+    - --tls=false
+  healthcheck:
+    test: ["CMD", "docker", "-H", "unix:///var/run/docker.sock", "info"]
+    interval: 1s
+    timeout: 3s
+    retries: 60
+  networks:
+    - swarm
+
+services:
+  manager1:
+    <<: *node
+    container_name: skepr-integration-manager-1
+    hostname: manager-1
+    ports:
+      - "127.0.0.1::2375"
+    volumes:
+      - manager1-data:/var/lib/docker
+
+  manager2:
+    <<: *node
+    container_name: skepr-integration-manager-2
+    hostname: manager-2
+    volumes:
+      - manager2-data:/var/lib/docker
+
+  manager3:
+    <<: *node
+    container_name: skepr-integration-manager-3
+    hostname: manager-3
+    volumes:
+      - manager3-data:/var/lib/docker
+
+  worker1:
+    <<: *node
+    container_name: skepr-integration-worker-1
+    hostname: worker-1
+    volumes:
+      - worker1-data:/var/lib/docker
+
+  worker2:
+    <<: *node
+    container_name: skepr-integration-worker-2
+    hostname: worker-2
+    volumes:
+      - worker2-data:/var/lib/docker
+
+networks:
+  swarm:
+
+volumes:
+  manager1-data:
+  manager2-data:
+  manager3-data:
+  worker1-data:
+  worker2-data:

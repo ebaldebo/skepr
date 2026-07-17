@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+compose_file="$script_dir/compose.yaml"
+project="skepr-integration"
+outer_docker_host="${SKEPR_INTEGRATION_OUTER_DOCKER_HOST:-unix:///var/run/docker.sock}"
+
+case "$outer_docker_host" in
+  unix:///*) ;;
+  *)
+    echo "refusing integration setup on non-Unix Docker endpoint: $outer_docker_host" >&2
+    exit 2
+    ;;
+esac
+
+docker_local() {
+  env \
+    -u DOCKER_CONTEXT \
+    -u DOCKER_TLS_VERIFY \
+    -u DOCKER_CERT_PATH \
+    DOCKER_HOST="$outer_docker_host" \
+    docker "$@"
+}
+
+compose() {
+  docker_local compose --project-name "$project" --file "$compose_file" "$@"
+}
+
+node_docker() {
+  local container="$1"
+  shift
+  docker_local exec "$container" docker -H unix:///var/run/docker.sock "$@"
+}
+
+cleanup() {
+  compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+containers=(
+  skepr-integration-manager-1
+  skepr-integration-manager-2
+  skepr-integration-manager-3
+  skepr-integration-worker-1
+  skepr-integration-worker-2
+)
+
+cleanup
+compose up --detach
+
+for container in "${containers[@]}"; do
+  ready=false
+  for ((attempt = 0; attempt < 60; attempt++)); do
+    if node_docker "$container" info >/dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$ready" != true ]]; then
+    docker_local logs "$container" >&2
+    echo "Docker Engine did not become ready in $container" >&2
+    exit 1
+  fi
+done
+
+node_docker skepr-integration-manager-1 swarm init --advertise-addr eth0 >/dev/null
+manager_token="$(node_docker skepr-integration-manager-1 swarm join-token --quiet manager)"
+worker_token="$(node_docker skepr-integration-manager-1 swarm join-token --quiet worker)"
+
+node_docker skepr-integration-manager-2 swarm join --advertise-addr eth0 --token "$manager_token" manager1:2377 >/dev/null
+node_docker skepr-integration-manager-3 swarm join --advertise-addr eth0 --token "$manager_token" manager1:2377 >/dev/null
+node_docker skepr-integration-worker-1 swarm join --advertise-addr eth0 --token "$worker_token" manager1:2377 >/dev/null
+node_docker skepr-integration-worker-2 swarm join --advertise-addr eth0 --token "$worker_token" manager1:2377 >/dev/null
+
+cluster_ready=false
+for ((attempt = 0; attempt < 60; attempt++)); do
+  mapfile -t node_states < <(node_docker skepr-integration-manager-1 node ls --format '{{.Status}}')
+  if [[ "${#node_states[@]}" -eq 5 ]]; then
+    cluster_ready=true
+    for state in "${node_states[@]}"; do
+      if [[ "$state" != "Ready" ]]; then
+        cluster_ready=false
+        break
+      fi
+    done
+  fi
+  if [[ "$cluster_ready" == true ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ "$cluster_ready" != true ]]; then
+  node_docker skepr-integration-manager-1 node ls >&2
+  echo "five-node Swarm did not become ready" >&2
+  exit 1
+fi
+
+published_endpoint="$(docker_local port skepr-integration-manager-1 2375/tcp)"
+published_endpoint="${published_endpoint%%$'\n'*}"
+case "$published_endpoint" in
+  127.0.0.1:*) ;;
+  *)
+    echo "refusing non-loopback integration endpoint: $published_endpoint" >&2
+    exit 2
+    ;;
+esac
+
+SKEPR_INTEGRATION_DOCKER_HOST="tcp://$published_endpoint" \
+  GOCACHE="${GOCACHE:-/tmp/skepr-go-cache}" \
+  GOMODCACHE="${GOMODCACHE:-/tmp/skepr-go-mod}" \
+  go test -tags=integration ./integration/swarm -count=1 "$@"
