@@ -9,11 +9,13 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/ebaldebo/skepr/internal/preflight"
 	"github.com/ebaldebo/skepr/internal/status"
 )
 
 const (
 	ExitSuccess          = 0
+	ExitSafetyGate       = 1
 	ExitInvalidUsage     = 2
 	ExitDockerConnection = 3
 )
@@ -27,22 +29,33 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 	}
 	args = globalFlags.Args()
 
-	if len(args) == 0 || args[0] != "status" {
-		report(stderr, "usage: skepr [--context name] status [--json]\n")
+	if len(args) == 0 {
+		report(stderr, "usage: skepr [--context name] <command>\n")
 		return ExitInvalidUsage
 	}
+	switch args[0] {
+	case "status":
+		return runStatus(ctx, args[1:], *contextName, connector, stdout, stderr)
+	case "check":
+		return runCheck(ctx, args[1:], *contextName, connector, stdout, stderr)
+	default:
+		report(stderr, "usage: skepr [--context name] <command>\n")
+		return ExitInvalidUsage
+	}
+}
 
+func runStatus(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	jsonOutput := flags.Bool("json", false, "emit JSON output")
-	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		if err == nil {
 			report(stderr, "usage: skepr [--context name] status [--json]\n")
 		}
 		return ExitInvalidUsage
 	}
 
-	connection, err := connector.Connect(ctx, *contextName)
+	connection, err := connector.Connect(ctx, contextName)
 	if err != nil {
 		report(stderr, "configure Docker connection: %v\n", err)
 		return ExitDockerConnection
@@ -153,6 +166,70 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 		report(stderr, "write status output: %v\n", err)
 		return ExitDockerConnection
 	}
+	return ExitSuccess
+}
+
+func runCheck(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("check", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "emit JSON output")
+	if len(args) == 2 && args[1] == "--json" {
+		args = []string{"--json", args[0]}
+	}
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
+		if err == nil {
+			report(stderr, "usage: skepr [--context name] check <node> [--json]\n")
+		}
+		return ExitInvalidUsage
+	}
+
+	connection, err := connector.Connect(ctx, contextName)
+	if err != nil {
+		report(stderr, "configure Docker connection: %v\n", err)
+		return ExitDockerConnection
+	}
+	defer func() { _ = connection.Close() }()
+
+	inventory, err := connection.Inspect(ctx)
+	if err != nil {
+		report(stderr, "inspect Docker Swarm: %v\n", err)
+		return ExitDockerConnection
+	}
+	result := preflight.CheckNode(inventory, flags.Arg(0))
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			report(stderr, "write check output: %v\n", err)
+			return ExitDockerConnection
+		}
+		if !result.Safe {
+			return ExitSafetyGate
+		}
+		return ExitSuccess
+	}
+	for _, finding := range result.Findings {
+		if finding.Level != preflight.LevelBlocker {
+			continue
+		}
+		_, _ = fmt.Fprintf(stdout, "%s: %s\n", strings.ToUpper(string(finding.Level)), finding.Message)
+	}
+	for _, finding := range result.Findings {
+		if finding.Level == preflight.LevelBlocker {
+			continue
+		}
+		_, _ = fmt.Fprintf(stdout, "%s: %s\n", strings.ToUpper(string(finding.Level)), finding.Message)
+	}
+	if !result.Safe {
+		targetName := result.RequestedNode
+		if result.Target != nil {
+			targetName = result.Target.Hostname
+		}
+		_, _ = fmt.Fprintf(stdout, "UNSAFE: node %s failed checks\n", targetName)
+		return ExitSafetyGate
+	}
+	_, _ = fmt.Fprintf(stdout, "SAFE: node %s passed checks\n", result.Target.Hostname)
 	return ExitSuccess
 }
 
