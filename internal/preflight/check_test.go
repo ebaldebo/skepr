@@ -186,3 +186,48 @@ func TestCheckNodeManagerHealth(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckNodeTargetLeadership(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		managerStatus   string
+		expectedSafe    bool
+		expectedFinding Finding
+	}{
+		{
+			name:            "leader",
+			managerStatus:   "leader",
+			expectedSafe:    false,
+			expectedFinding: Finding{Gate: "target_not_leader", Level: LevelBlocker, Message: "target manager manager-1 is the current Swarm leader"},
+		},
+		{
+			name:            "reachable non-leader",
+			managerStatus:   "reachable",
+			expectedSafe:    true,
+			expectedFinding: Finding{Gate: "target_not_leader", Level: LevelPass, Message: "target manager manager-1 is not the current Swarm leader"},
+		},
+		{
+			name:            "leadership unavailable",
+			expectedSafe:    false,
+			expectedFinding: Finding{Gate: "target_not_leader", Level: LevelBlocker, Message: "target manager manager-1 leadership cannot be verified: manager status is unavailable"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := CheckNode(status.Result{
+				Cluster: status.Cluster{LocalState: "active", ControlAvailable: true},
+				Nodes: []status.Node{
+					{Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: tt.managerStatus},
+				},
+			}, "manager-1")
+
+			assert.Equal(t, tt.expectedSafe, result.Safe)
+			assert.Equal(t, tt.expectedFinding, result.Findings[3])
+		})
+	}
+}

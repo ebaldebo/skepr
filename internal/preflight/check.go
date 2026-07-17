@@ -50,6 +50,7 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 		})
 		result.addStateFinding(node)
 		result.addAvailabilityFinding(node)
+		result.addTargetLeadershipFinding(node)
 		result.addEndpointFindings(inventory.Cluster)
 		result.addManagerFindings(inventory.Nodes)
 		return result
@@ -88,6 +89,32 @@ func (r *Result) addAvailabilityFinding(node status.Node) {
 		r.Safe = false
 		finding.Level = LevelBlocker
 		finding.Message = fmt.Sprintf("target node %s availability is %s, expected active", node.Hostname, node.Availability)
+	}
+	r.Findings = append(r.Findings, finding)
+}
+
+func (r *Result) addTargetLeadershipFinding(node status.Node) {
+	if node.Role != "manager" {
+		return
+	}
+
+	finding := Finding{Gate: "target_not_leader"}
+	switch node.ManagerStatus {
+	case "reachable":
+		finding.Level = LevelPass
+		finding.Message = fmt.Sprintf("target manager %s is not the current Swarm leader", node.Hostname)
+	case "leader":
+		r.Safe = false
+		finding.Level = LevelBlocker
+		finding.Message = fmt.Sprintf("target manager %s is the current Swarm leader", node.Hostname)
+	default:
+		r.Safe = false
+		finding.Level = LevelBlocker
+		managerStatus := node.ManagerStatus
+		if managerStatus == "" {
+			managerStatus = "unavailable"
+		}
+		finding.Message = fmt.Sprintf("target manager %s leadership cannot be verified: manager status is %s", node.Hostname, managerStatus)
 	}
 	r.Findings = append(r.Findings, finding)
 }

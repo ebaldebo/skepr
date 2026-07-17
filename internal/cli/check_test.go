@@ -103,6 +103,32 @@ UNSAFE: target node worker-1 failed checks
 `, stdout.String())
 }
 
+func TestCheckBlocksLeaderTarget(t *testing.T) {
+	t.Parallel()
+
+	connection := checkInspector{result: status.Result{
+		SchemaVersion: status.SchemaVersion,
+		Endpoint:      "unix:///var/run/docker.sock",
+		Cluster:       status.Cluster{LocalState: "active", ControlAvailable: true},
+		Nodes: []status.Node{
+			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+		},
+	}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"check", "manager-1"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `BLOCKER: target manager manager-1 is the current Swarm leader
+PASS: target node manager-1 exists with role manager
+PASS: target node manager-1 is ready
+PASS: target node manager-1 is active
+PASS: connected Docker endpoint is part of an active Swarm
+PASS: connected Docker endpoint provides Swarm manager control
+PASS: Swarm manager manager-1 is healthy (ready, active and leader)
+UNSAFE: target node manager-1 failed checks
+`, stdout.String())
+}
+
 func TestCheckJSONOutput(t *testing.T) {
 	t.Parallel()
 
