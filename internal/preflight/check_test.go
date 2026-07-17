@@ -223,11 +223,88 @@ func TestCheckNodeTargetLeadership(t *testing.T) {
 				Cluster: status.Cluster{LocalState: "active", ControlAvailable: true},
 				Nodes: []status.Node{
 					{Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: tt.managerStatus},
+					{Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+					{Hostname: "manager-3", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
 				},
 			}, "manager-1")
 
 			assert.Equal(t, tt.expectedSafe, result.Safe)
 			assert.Equal(t, tt.expectedFinding, result.Findings[3])
+		})
+	}
+}
+
+func TestCheckNodeManagerQuorum(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		nodes           []status.Node
+		expectedSafe    bool
+		expectedFinding Finding
+	}{
+		{
+			name: "one manager",
+			nodes: []status.Node{
+				{ID: "target", Hostname: "manager-target", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+			},
+			expectedSafe:    false,
+			expectedFinding: Finding{Gate: "manager_quorum", Level: LevelBlocker, Message: "taking target manager manager-target offline leaves 0 healthy managers; quorum requires 1 of 1"},
+		},
+		{
+			name: "two managers",
+			nodes: []status.Node{
+				{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+				{ID: "target", Hostname: "manager-target", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+			},
+			expectedSafe:    false,
+			expectedFinding: Finding{Gate: "manager_quorum", Level: LevelBlocker, Message: "taking target manager manager-target offline leaves 1 healthy manager; quorum requires 2 of 2"},
+		},
+		{
+			name: "three healthy managers",
+			nodes: []status.Node{
+				{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+				{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+				{ID: "target", Hostname: "manager-target", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+			},
+			expectedSafe:    true,
+			expectedFinding: Finding{Gate: "manager_quorum", Level: LevelPass, Message: "taking target manager manager-target offline leaves 2 healthy managers; quorum requires 2 of 3"},
+		},
+		{
+			name: "three managers with one unhealthy remainder",
+			nodes: []status.Node{
+				{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+				{ID: "m2", Hostname: "manager-2", Role: "manager", State: "down", Availability: "active", ManagerStatus: "unreachable"},
+				{ID: "target", Hostname: "manager-target", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+			},
+			expectedSafe:    false,
+			expectedFinding: Finding{Gate: "manager_quorum", Level: LevelBlocker, Message: "taking target manager manager-target offline leaves 1 healthy manager; quorum requires 2 of 3"},
+		},
+		{
+			name: "five healthy managers",
+			nodes: []status.Node{
+				{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+				{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+				{ID: "m3", Hostname: "manager-3", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+				{ID: "m4", Hostname: "manager-4", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+				{ID: "target", Hostname: "manager-target", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+			},
+			expectedSafe:    true,
+			expectedFinding: Finding{Gate: "manager_quorum", Level: LevelPass, Message: "taking target manager manager-target offline leaves 4 healthy managers; quorum requires 3 of 5"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := CheckNode(status.Result{
+				Cluster: status.Cluster{LocalState: "active", ControlAvailable: true},
+				Nodes:   tt.nodes,
+			}, "target")
+
+			assert.Equal(t, tt.expectedSafe, result.Safe)
+			assert.Equal(t, tt.expectedFinding, result.Findings[4])
 		})
 	}
 }

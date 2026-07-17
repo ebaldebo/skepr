@@ -112,6 +112,8 @@ func TestCheckBlocksLeaderTarget(t *testing.T) {
 		Cluster:       status.Cluster{LocalState: "active", ControlAvailable: true},
 		Nodes: []status.Node{
 			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+			{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+			{ID: "m3", Hostname: "manager-3", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
 		},
 	}}
 	var stdout bytes.Buffer
@@ -122,10 +124,42 @@ func TestCheckBlocksLeaderTarget(t *testing.T) {
 PASS: target node manager-1 exists with role manager
 PASS: target node manager-1 is ready
 PASS: target node manager-1 is active
+PASS: taking target manager manager-1 offline leaves 2 healthy managers; quorum requires 2 of 3
 PASS: connected Docker endpoint is part of an active Swarm
 PASS: connected Docker endpoint provides Swarm manager control
 PASS: Swarm manager manager-1 is healthy (ready, active and leader)
+PASS: Swarm manager manager-2 is healthy (ready, active and reachable)
+PASS: Swarm manager manager-3 is healthy (ready, active and reachable)
 UNSAFE: target node manager-1 failed checks
+`, stdout.String())
+}
+
+func TestCheckBlocksUnsafeManagerQuorum(t *testing.T) {
+	t.Parallel()
+
+	connection := checkInspector{result: status.Result{
+		SchemaVersion: status.SchemaVersion,
+		Endpoint:      "unix:///var/run/docker.sock",
+		Cluster:       status.Cluster{LocalState: "active", ControlAvailable: true},
+		Nodes: []status.Node{
+			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+			{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
+		},
+	}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"check", "manager-2"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `BLOCKER: taking target manager manager-2 offline leaves 1 healthy manager; quorum requires 2 of 2
+PASS: target node manager-2 exists with role manager
+PASS: target node manager-2 is ready
+PASS: target node manager-2 is active
+PASS: target manager manager-2 is not the current Swarm leader
+PASS: connected Docker endpoint is part of an active Swarm
+PASS: connected Docker endpoint provides Swarm manager control
+PASS: Swarm manager manager-1 is healthy (ready, active and leader)
+PASS: Swarm manager manager-2 is healthy (ready, active and reachable)
+UNSAFE: target node manager-2 failed checks
 `, stdout.String())
 }
 

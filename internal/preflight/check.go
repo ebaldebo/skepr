@@ -51,6 +51,7 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 		result.addStateFinding(node)
 		result.addAvailabilityFinding(node)
 		result.addTargetLeadershipFinding(node)
+		result.addTargetQuorumFinding(node, inventory.Nodes)
 		result.addEndpointFindings(inventory.Cluster)
 		result.addManagerFindings(inventory.Nodes)
 		return result
@@ -119,6 +120,45 @@ func (r *Result) addTargetLeadershipFinding(node status.Node) {
 	r.Findings = append(r.Findings, finding)
 }
 
+func (r *Result) addTargetQuorumFinding(target status.Node, nodes []status.Node) {
+	if target.Role != "manager" {
+		return
+	}
+
+	totalManagers := 0
+	remainingHealthy := 0
+	for _, node := range nodes {
+		if node.Role != "manager" {
+			continue
+		}
+		totalManagers++
+		isTarget := target.ID != "" && node.ID == target.ID
+		if target.ID == "" {
+			isTarget = node.Hostname == target.Hostname
+		}
+		if !isTarget && len(managerHealthIssues(node)) == 0 {
+			remainingHealthy++
+		}
+	}
+
+	required := totalManagers/2 + 1
+	managerNoun := "managers"
+	if remainingHealthy == 1 {
+		managerNoun = "manager"
+	}
+	finding := Finding{
+		Gate:    "manager_quorum",
+		Message: fmt.Sprintf("taking target manager %s offline leaves %d healthy %s; quorum requires %d of %d", target.Hostname, remainingHealthy, managerNoun, required, totalManagers),
+	}
+	if remainingHealthy >= required {
+		finding.Level = LevelPass
+	} else {
+		r.Safe = false
+		finding.Level = LevelBlocker
+	}
+	r.Findings = append(r.Findings, finding)
+}
+
 func (r *Result) addEndpointFindings(cluster status.Cluster) {
 	stateFinding := Finding{Gate: "swarm_active"}
 	if cluster.LocalState == "active" {
@@ -149,21 +189,7 @@ func (r *Result) addManagerFindings(nodes []status.Node) {
 			continue
 		}
 
-		var issues []string
-		if node.State != "ready" {
-			issues = append(issues, fmt.Sprintf("state is %s, expected ready", node.State))
-		}
-		if node.Availability != "active" {
-			issues = append(issues, fmt.Sprintf("availability is %s, expected active", node.Availability))
-		}
-		if node.ManagerStatus != "leader" && node.ManagerStatus != "reachable" {
-			managerStatus := node.ManagerStatus
-			if managerStatus == "" {
-				managerStatus = "unavailable"
-			}
-			issues = append(issues, fmt.Sprintf("manager status is %s, expected leader or reachable", managerStatus))
-		}
-
+		issues := managerHealthIssues(node)
 		finding := Finding{Gate: "manager_healthy"}
 		if len(issues) == 0 {
 			finding.Level = LevelPass
@@ -175,4 +201,22 @@ func (r *Result) addManagerFindings(nodes []status.Node) {
 		}
 		r.Findings = append(r.Findings, finding)
 	}
+}
+
+func managerHealthIssues(node status.Node) []string {
+	var issues []string
+	if node.State != "ready" {
+		issues = append(issues, fmt.Sprintf("state is %s, expected ready", node.State))
+	}
+	if node.Availability != "active" {
+		issues = append(issues, fmt.Sprintf("availability is %s, expected active", node.Availability))
+	}
+	if node.ManagerStatus != "leader" && node.ManagerStatus != "reachable" {
+		managerStatus := node.ManagerStatus
+		if managerStatus == "" {
+			managerStatus = "unavailable"
+		}
+		issues = append(issues, fmt.Sprintf("manager status is %s, expected leader or reachable", managerStatus))
+	}
+	return issues
 }
