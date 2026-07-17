@@ -54,6 +54,7 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 		result.addTargetQuorumFinding(node, inventory.Nodes)
 		result.addEndpointFindings(inventory.Cluster)
 		result.addManagerFindings(inventory.Nodes)
+		result.addServiceFindings(inventory.Services)
 		return result
 	}
 
@@ -65,6 +66,7 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 	})
 	result.addEndpointFindings(inventory.Cluster)
 	result.addManagerFindings(inventory.Nodes)
+	result.addServiceFindings(inventory.Services)
 	return result
 }
 
@@ -201,6 +203,39 @@ func (r *Result) addManagerFindings(nodes []status.Node) {
 		}
 		r.Findings = append(r.Findings, finding)
 	}
+}
+
+func (r *Result) addServiceFindings(services []status.Service) {
+	if len(services) == 0 {
+		return
+	}
+
+	allConverged := true
+	for _, service := range services {
+		if service.Converged {
+			continue
+		}
+		allConverged = false
+		r.Safe = false
+		r.Findings = append(r.Findings, Finding{
+			Gate:    "service_converged",
+			Level:   LevelBlocker,
+			Message: fmt.Sprintf("Swarm service %s has %d of %d running tasks", service.Name, service.RunningTasks, service.DesiredTasks),
+		})
+	}
+	if !allConverged {
+		return
+	}
+
+	message := fmt.Sprintf("all %d Swarm services are converged", len(services))
+	if len(services) == 1 {
+		message = fmt.Sprintf("Swarm service %s is converged", services[0].Name)
+	}
+	r.Findings = append(r.Findings, Finding{
+		Gate:    "service_converged",
+		Level:   LevelPass,
+		Message: message,
+	})
 }
 
 func managerHealthIssues(node status.Node) []string {

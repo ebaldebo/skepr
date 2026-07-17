@@ -308,3 +308,86 @@ func TestCheckNodeManagerQuorum(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckNodeServiceConvergence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		services         []status.Service
+		expectedSafe     bool
+		expectedFindings []Finding
+	}{
+		{
+			name:         "no services",
+			expectedSafe: true,
+		},
+		{
+			name: "one converged service",
+			services: []status.Service{
+				{Name: "api", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+			},
+			expectedSafe: true,
+			expectedFindings: []Finding{
+				{Gate: "service_converged", Level: LevelPass, Message: "Swarm service api is converged"},
+			},
+		},
+		{
+			name: "multiple converged services",
+			services: []status.Service{
+				{Name: "api", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+				{Name: "database", RunningTasks: 1, DesiredTasks: 1, Converged: true},
+			},
+			expectedSafe: true,
+			expectedFindings: []Finding{
+				{Gate: "service_converged", Level: LevelPass, Message: "all 2 Swarm services are converged"},
+			},
+		},
+		{
+			name: "unconverged service",
+			services: []status.Service{
+				{Name: "api", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+				{Name: "database", RunningTasks: 0, DesiredTasks: 1, Converged: false},
+			},
+			expectedSafe: false,
+			expectedFindings: []Finding{
+				{Gate: "service_converged", Level: LevelBlocker, Message: "Swarm service database has 0 of 1 running tasks"},
+			},
+		},
+		{
+			name: "multiple unconverged services",
+			services: []status.Service{
+				{Name: "api", RunningTasks: 1, DesiredTasks: 2, Converged: false},
+				{Name: "database", RunningTasks: 0, DesiredTasks: 1, Converged: false},
+			},
+			expectedSafe: false,
+			expectedFindings: []Finding{
+				{Gate: "service_converged", Level: LevelBlocker, Message: "Swarm service api has 1 of 2 running tasks"},
+				{Gate: "service_converged", Level: LevelBlocker, Message: "Swarm service database has 0 of 1 running tasks"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := CheckNode(status.Result{
+				Cluster: status.Cluster{LocalState: "active", ControlAvailable: true},
+				Nodes: []status.Node{
+					{Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+				},
+				Services: tt.services,
+			}, "worker-1")
+
+			var serviceFindings []Finding
+			for _, finding := range result.Findings {
+				if finding.Gate == "service_converged" {
+					serviceFindings = append(serviceFindings, finding)
+				}
+			}
+			assert.Equal(t, tt.expectedSafe, result.Safe)
+			assert.Equal(t, tt.expectedFindings, serviceFindings)
+		})
+	}
+}

@@ -13,7 +13,7 @@ func TestCheckPrintsPassingNodeGates(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
-	exitCode := Run(context.Background(), []string{"check", "worker-1"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
+	exitCode := Run(context.Background(), []string{"check", "worker-1"}, &fakeConnector{connection: healthyCheckConnection()}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, ExitSuccess, exitCode)
 	assert.Equal(t, `PASS: target node worker-1 exists with role worker
@@ -23,6 +23,7 @@ PASS: connected Docker endpoint is part of an active Swarm
 PASS: connected Docker endpoint provides Swarm manager control
 PASS: Swarm manager manager-1 is healthy (ready, active and leader)
 PASS: Swarm manager manager-2 is healthy (ready, active and reachable)
+PASS: all 3 Swarm services are converged
 SAFE: target node worker-1 passed checks
 `, stdout.String())
 }
@@ -163,11 +164,40 @@ UNSAFE: target node manager-2 failed checks
 `, stdout.String())
 }
 
+func TestCheckBlocksUnconvergedService(t *testing.T) {
+	t.Parallel()
+
+	connection := checkInspector{result: status.Result{
+		SchemaVersion: status.SchemaVersion,
+		Endpoint:      "unix:///var/run/docker.sock",
+		Cluster:       status.Cluster{LocalState: "active", ControlAvailable: true},
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+		},
+		Services: []status.Service{
+			{ID: "s1", Name: "api", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+			{ID: "s2", Name: "database", RunningTasks: 0, DesiredTasks: 1, Converged: false},
+		},
+	}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"check", "worker-1"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `BLOCKER: Swarm service database has 0 of 1 running tasks
+PASS: target node worker-1 exists with role worker
+PASS: target node worker-1 is ready
+PASS: target node worker-1 is active
+PASS: connected Docker endpoint is part of an active Swarm
+PASS: connected Docker endpoint provides Swarm manager control
+UNSAFE: target node worker-1 failed checks
+`, stdout.String())
+}
+
 func TestCheckJSONOutput(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
-	exitCode := Run(context.Background(), []string{"check", "worker-1", "--json"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
+	exitCode := Run(context.Background(), []string{"check", "worker-1", "--json"}, &fakeConnector{connection: healthyCheckConnection()}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, ExitSuccess, exitCode)
 	assert.Equal(t, `{
@@ -217,6 +247,11 @@ func TestCheckJSONOutput(t *testing.T) {
       "gate": "manager_healthy",
       "level": "pass",
       "message": "Swarm manager manager-2 is healthy (ready, active and reachable)"
+    },
+    {
+      "gate": "service_converged",
+      "level": "pass",
+      "message": "all 3 Swarm services are converged"
     }
   ]
 }
@@ -232,3 +267,13 @@ func (c checkInspector) Inspect(context.Context) (status.Result, error) {
 }
 
 func (checkInspector) Close() error { return nil }
+
+func healthyCheckConnection() status.Connection {
+	result, _ := fakeInspector{}.Inspect(context.Background())
+	for i := range result.Services {
+		result.Services[i].RunningTasks = result.Services[i].DesiredTasks
+		result.Services[i].Converged = true
+	}
+	result.UnhealthyTasks = nil
+	return checkInspector{result: result}
+}
