@@ -31,13 +31,24 @@ type Service struct {
 	Converged    bool   `json:"converged"`
 }
 
+type Task struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Service      string `json:"service"`
+	Node         string `json:"node"`
+	DesiredState string `json:"desired_state"`
+	State        string `json:"state"`
+	Error        string `json:"error,omitempty"`
+}
+
 type Result struct {
-	SchemaVersion int       `json:"schema_version"`
-	Endpoint      string    `json:"endpoint"`
-	Cluster       Cluster   `json:"cluster"`
-	Leader        string    `json:"leader,omitempty"`
-	Nodes         []Node    `json:"nodes,omitempty"`
-	Services      []Service `json:"services,omitempty"`
+	SchemaVersion  int       `json:"schema_version"`
+	Endpoint       string    `json:"endpoint"`
+	Cluster        Cluster   `json:"cluster"`
+	Leader         string    `json:"leader,omitempty"`
+	Nodes          []Node    `json:"nodes,omitempty"`
+	Services       []Service `json:"services,omitempty"`
+	UnhealthyTasks []Task    `json:"unhealthy_tasks,omitempty"`
 }
 
 type Inspector interface {

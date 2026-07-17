@@ -66,6 +66,13 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 	}
 
 	var output strings.Builder
+	for _, task := range result.UnhealthyTasks {
+		_, _ = fmt.Fprintf(&output, "UNSAFE: task %s is %s", task.Name, task.State)
+		if task.Error != "" {
+			_, _ = fmt.Fprintf(&output, ": %s", task.Error)
+		}
+		output.WriteByte('\n')
+	}
 	for _, service := range result.Services {
 		if !service.Converged {
 			_, _ = fmt.Fprintf(&output, "UNSAFE: service %s has %d/%d running tasks\n", service.Name, service.RunningTasks, service.DesiredTasks)
@@ -117,6 +124,27 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 				service.DesiredTasks,
 				convergence,
 			)
+		}
+		_ = table.Flush()
+	}
+	if len(result.UnhealthyTasks) > 0 {
+		output.WriteString("\nUnhealthy tasks:\n")
+		table := tabwriter.NewWriter(&output, 0, 2, 2, ' ', 0)
+		for _, task := range result.UnhealthyTasks {
+			_, _ = fmt.Fprintf(
+				table,
+				"  %s\t%s\t%s\t%s\t%s\t%s",
+				task.Name,
+				task.ID,
+				task.Service,
+				task.Node,
+				task.DesiredState,
+				task.State,
+			)
+			if task.Error != "" {
+				_, _ = fmt.Fprintf(table, "\t%s", task.Error)
+			}
+			_, _ = fmt.Fprintln(table)
 		}
 		_ = table.Flush()
 	}

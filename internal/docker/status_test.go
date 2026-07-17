@@ -71,6 +71,14 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 				ServiceStatus: &swarm.ServiceStatus{RunningTasks: 0, DesiredTasks: 1},
 			},
 		},
+		tasks: []swarm.Task{
+			{ID: "healthy", ServiceID: "s1", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateRunning}},
+			{ID: "starting", ServiceID: "s1", Slot: 2, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateStarting}},
+			{ID: "rejected", ServiceID: "s2", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateRejected, Err: "no suitable node"}},
+			{ID: "failed", ServiceID: "s1", Slot: 2, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "exit code 1"}},
+			{ID: "orphaned", ServiceID: "s3", NodeID: "m2", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateOrphaned}},
+			{ID: "historical", ServiceID: "s2", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateShutdown, Status: swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "old failure"}},
+		},
 	})
 
 	result, err := inspector.Inspect(context.Background())
@@ -94,6 +102,11 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false},
 			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 3, DesiredTasks: 3, Converged: true},
 			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+		},
+		UnhealthyTasks: []status.Task{
+			{ID: "orphaned", Name: "agent.manager-2", Service: "agent", Node: "manager-2", DesiredState: "running", State: "orphaned"},
+			{ID: "failed", Name: "api.2", Service: "api", Node: "worker-1", DesiredState: "running", State: "failed", Error: "exit code 1"},
+			{ID: "rejected", Name: "database.1", Service: "database", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
 		},
 	}, result)
 }
@@ -126,6 +139,7 @@ type fakeEngine struct {
 	info     system.Info
 	nodes    []swarm.Node
 	services []swarm.Service
+	tasks    []swarm.Task
 }
 
 func (f fakeEngine) NodeList(context.Context, client.NodeListOptions) (client.NodeListResult, error) {
@@ -137,6 +151,13 @@ func (f fakeEngine) ServiceList(_ context.Context, options client.ServiceListOpt
 		return client.ServiceListResult{}, errors.New("service status was not requested")
 	}
 	return client.ServiceListResult{Items: f.services}, nil
+}
+
+func (f fakeEngine) TaskList(_ context.Context, options client.TaskListOptions) (client.TaskListResult, error) {
+	if !options.Filters["desired-state"]["running"] {
+		return client.TaskListResult{}, errors.New("desired running tasks were not requested")
+	}
+	return client.TaskListResult{Items: f.tasks}, nil
 }
 
 func (f fakeEngine) Info(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {

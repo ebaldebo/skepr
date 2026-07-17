@@ -16,7 +16,8 @@ func TestStatusPrintsClusterSummary(t *testing.T) {
 	exitCode := Run(context.Background(), []string{"status"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, 0, exitCode)
-	assert.Equal(t, `UNSAFE: service database has 0/1 running tasks
+	assert.Equal(t, `UNSAFE: task database.1 is rejected: no suitable node
+UNSAFE: service database has 0/1 running tasks
 Cluster: cluster-1
 Endpoint: unix:///var/run/docker.sock
 Swarm: active
@@ -32,6 +33,9 @@ Services:
   database  s2  replicated  0/1  unconverged
   agent     s3  global      3/3  converged
   api       s1  replicated  2/2  converged
+
+Unhealthy tasks:
+  database.1  t1  database  worker-1  running  rejected  no suitable node
 `, stdout.String())
 }
 
@@ -101,6 +105,17 @@ func TestStatusJSONOutput(t *testing.T) {
       "desired_tasks": 2,
       "converged": true
     }
+  ],
+  "unhealthy_tasks": [
+    {
+      "id": "t1",
+      "name": "database.1",
+      "service": "database",
+      "node": "worker-1",
+      "desired_state": "running",
+      "state": "rejected",
+      "error": "no suitable node"
+    }
   ]
 }`, stdout.String())
 	assert.Equal(t, `{
@@ -162,6 +177,17 @@ func TestStatusJSONOutput(t *testing.T) {
       "desired_tasks": 2,
       "converged": true
     }
+  ],
+  "unhealthy_tasks": [
+    {
+      "id": "t1",
+      "name": "database.1",
+      "service": "database",
+      "node": "worker-1",
+      "desired_state": "running",
+      "state": "rejected",
+      "error": "no suitable node"
+    }
   ]
 }
 `, stdout.String())
@@ -221,6 +247,9 @@ func (fakeInspector) Inspect(context.Context) (status.Result, error) {
 			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false},
 			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 3, DesiredTasks: 3, Converged: true},
 			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+		},
+		UnhealthyTasks: []status.Task{
+			{ID: "t1", Name: "database.1", Service: "database", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
 		},
 	}, nil
 }

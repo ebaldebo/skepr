@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/ebaldebo/skepr/internal/status"
+	"github.com/moby/moby/api/types/swarm"
 	"github.com/moby/moby/client"
 )
 
@@ -13,6 +14,7 @@ type engine interface {
 	Info(context.Context, client.InfoOptions) (client.SystemInfoResult, error)
 	NodeList(context.Context, client.NodeListOptions) (client.NodeListResult, error)
 	ServiceList(context.Context, client.ServiceListOptions) (client.ServiceListResult, error)
+	TaskList(context.Context, client.TaskListOptions) (client.TaskListResult, error)
 	DaemonHost() string
 }
 
@@ -57,7 +59,9 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 	if err != nil {
 		return status.Result{}, fmt.Errorf("query Swarm nodes at %q: %w", i.endpoint, err)
 	}
+	nodeNames := make(map[string]string, len(nodeResponse.Items))
 	for _, node := range nodeResponse.Items {
+		nodeNames[node.ID] = node.Description.Hostname
 		managerStatus := ""
 		if node.ManagerStatus != nil {
 			managerStatus = string(node.ManagerStatus.Reachability)
@@ -83,6 +87,8 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 	if err != nil {
 		return status.Result{}, fmt.Errorf("query Swarm services at %q: %w", i.endpoint, err)
 	}
+	serviceNames := make(map[string]string, len(serviceResponse.Items))
+	serviceModes := make(map[string]string, len(serviceResponse.Items))
 	for _, service := range serviceResponse.Items {
 		if service.ServiceStatus == nil {
 			return status.Result{}, fmt.Errorf("query Swarm services at %q: service %q has no task counts", i.endpoint, service.Spec.Name)
@@ -98,6 +104,8 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 		case service.Spec.Mode.GlobalJob != nil:
 			mode = "global-job"
 		}
+		serviceNames[service.ID] = service.Spec.Name
+		serviceModes[service.ID] = mode
 		result.Services = append(result.Services, status.Service{
 			ID:           service.ID,
 			Name:         service.Spec.Name,
@@ -113,7 +121,62 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 		}
 		return result.Services[a].Name < result.Services[b].Name
 	})
+
+	taskFilters := make(client.Filters).Add("desired-state", string(swarm.TaskStateRunning))
+	taskResponse, err := i.engine.TaskList(ctx, client.TaskListOptions{Filters: taskFilters})
+	if err != nil {
+		return status.Result{}, fmt.Errorf("query Swarm tasks at %q: %w", i.endpoint, err)
+	}
+	for _, task := range taskResponse.Items {
+		if task.DesiredState != swarm.TaskStateRunning || !unhealthyTaskState(task.Status.State) {
+			continue
+		}
+		serviceName := serviceNames[task.ServiceID]
+		if serviceName == "" {
+			serviceName = task.ServiceID
+		}
+		nodeName := nodeNames[task.NodeID]
+		if nodeName == "" {
+			nodeName = task.NodeID
+		}
+		if nodeName == "" {
+			nodeName = "unassigned"
+		}
+		taskName := serviceName + "." + nodeName
+		if serviceModes[task.ServiceID] == "replicated" || serviceModes[task.ServiceID] == "replicated-job" {
+			taskName = fmt.Sprintf("%s.%d", serviceName, task.Slot)
+		}
+		result.UnhealthyTasks = append(result.UnhealthyTasks, status.Task{
+			ID:           task.ID,
+			Name:         taskName,
+			Service:      serviceName,
+			Node:         nodeName,
+			DesiredState: string(task.DesiredState),
+			State:        string(task.Status.State),
+			Error:        task.Status.Err,
+		})
+	}
+	sort.Slice(result.UnhealthyTasks, func(a, b int) bool {
+		if result.UnhealthyTasks[a].Name != result.UnhealthyTasks[b].Name {
+			return result.UnhealthyTasks[a].Name < result.UnhealthyTasks[b].Name
+		}
+		return result.UnhealthyTasks[a].ID < result.UnhealthyTasks[b].ID
+	})
 	return result, nil
+}
+
+func unhealthyTaskState(state swarm.TaskState) bool {
+	switch state {
+	case swarm.TaskStateComplete,
+		swarm.TaskStateShutdown,
+		swarm.TaskStateFailed,
+		swarm.TaskStateRejected,
+		swarm.TaskStateRemove,
+		swarm.TaskStateOrphaned:
+		return true
+	default:
+		return false
+	}
 }
 
 func (i *Inspector) Close() error {
