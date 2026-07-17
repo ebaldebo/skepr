@@ -34,7 +34,9 @@ type Service struct {
 type Task struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
+	ServiceID    string `json:"-"`
 	Service      string `json:"service"`
+	NodeID       string `json:"-"`
 	Node         string `json:"node"`
 	DesiredState string `json:"desired_state"`
 	State        string `json:"state"`
@@ -49,6 +51,7 @@ type Result struct {
 	Nodes          []Node    `json:"nodes,omitempty"`
 	Services       []Service `json:"services,omitempty"`
 	UnhealthyTasks []Task    `json:"unhealthy_tasks,omitempty"`
+	DesiredTasks   []Task    `json:"-"`
 }
 
 type Inspector interface {

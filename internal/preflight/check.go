@@ -2,6 +2,7 @@ package preflight
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/ebaldebo/skepr/internal/status"
@@ -20,13 +21,33 @@ type Finding struct {
 	Message string `json:"message"`
 }
 
+type WorkloadTask struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	ServiceID string `json:"service_id"`
+	Service   string `json:"service"`
+	State     string `json:"state"`
+}
+
+type AffectedService struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type TargetWorkload struct {
+	DesiredRunningTaskCount int               `json:"desired_running_task_count"`
+	Tasks                   []WorkloadTask    `json:"tasks"`
+	AffectedServices        []AffectedService `json:"affected_services"`
+}
+
 type Result struct {
-	SchemaVersion int          `json:"schema_version"`
-	Endpoint      string       `json:"endpoint"`
-	RequestedNode string       `json:"requested_node"`
-	Target        *status.Node `json:"target,omitempty"`
-	Safe          bool         `json:"safe"`
-	Findings      []Finding    `json:"findings"`
+	SchemaVersion  int             `json:"schema_version"`
+	Endpoint       string          `json:"endpoint"`
+	RequestedNode  string          `json:"requested_node"`
+	Target         *status.Node    `json:"target,omitempty"`
+	TargetWorkload *TargetWorkload `json:"target_workload,omitempty"`
+	Safe           bool            `json:"safe"`
+	Findings       []Finding       `json:"findings"`
 }
 
 func CheckNode(inventory status.Result, requestedNode string) Result {
@@ -48,6 +69,7 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 			Level:   LevelPass,
 			Message: fmt.Sprintf("target node %s exists with role %s", node.Hostname, node.Role),
 		})
+		result.TargetWorkload = buildTargetWorkload(node, inventory.DesiredTasks)
 		result.addStateFinding(node)
 		result.addAvailabilityFinding(node)
 		result.addTargetLeadershipFinding(node)
@@ -68,6 +90,57 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 	result.addManagerFindings(inventory.Nodes)
 	result.addServiceFindings(inventory.Services)
 	return result
+}
+
+func buildTargetWorkload(target status.Node, tasks []status.Task) *TargetWorkload {
+	workload := &TargetWorkload{
+		Tasks:            []WorkloadTask{},
+		AffectedServices: []AffectedService{},
+	}
+	affectedServices := make(map[string]AffectedService)
+	for _, task := range tasks {
+		if task.DesiredState != "running" {
+			continue
+		}
+		assignedToTarget := target.ID != "" && task.NodeID == target.ID
+		if target.ID == "" {
+			assignedToTarget = task.Node == target.Hostname
+		}
+		if !assignedToTarget {
+			continue
+		}
+
+		workload.Tasks = append(workload.Tasks, WorkloadTask{
+			ID:        task.ID,
+			Name:      task.Name,
+			ServiceID: task.ServiceID,
+			Service:   task.Service,
+			State:     task.State,
+		})
+		serviceKey := task.ServiceID
+		if serviceKey == "" {
+			serviceKey = task.Service
+		}
+		affectedServices[serviceKey] = AffectedService{ID: task.ServiceID, Name: task.Service}
+	}
+
+	sort.Slice(workload.Tasks, func(a, b int) bool {
+		if workload.Tasks[a].Name != workload.Tasks[b].Name {
+			return workload.Tasks[a].Name < workload.Tasks[b].Name
+		}
+		return workload.Tasks[a].ID < workload.Tasks[b].ID
+	})
+	for _, service := range affectedServices {
+		workload.AffectedServices = append(workload.AffectedServices, service)
+	}
+	sort.Slice(workload.AffectedServices, func(a, b int) bool {
+		if workload.AffectedServices[a].Name != workload.AffectedServices[b].Name {
+			return workload.AffectedServices[a].Name < workload.AffectedServices[b].Name
+		}
+		return workload.AffectedServices[a].ID < workload.AffectedServices[b].ID
+	})
+	workload.DesiredRunningTaskCount = len(workload.Tasks)
+	return workload
 }
 
 func (r *Result) addStateFinding(node status.Node) {

@@ -27,7 +27,11 @@ func TestCheckNode(t *testing.T) {
 				Endpoint:      "unix:///var/run/docker.sock",
 				RequestedNode: "worker-1",
 				Target:        &status.Node{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
-				Safe:          true,
+				TargetWorkload: &TargetWorkload{
+					Tasks:            []WorkloadTask{},
+					AffectedServices: []AffectedService{},
+				},
+				Safe: true,
 				Findings: []Finding{
 					{Gate: "target_exists", Level: LevelPass, Message: "target node worker-1 exists with role worker"},
 					{Gate: "target_ready", Level: LevelPass, Message: "target node worker-1 is ready"},
@@ -48,7 +52,11 @@ func TestCheckNode(t *testing.T) {
 				Endpoint:      "unix:///var/run/docker.sock",
 				RequestedNode: "w1",
 				Target:        &status.Node{ID: "w1", Hostname: "worker-1", Role: "worker", State: "down", Availability: "pause"},
-				Safe:          false,
+				TargetWorkload: &TargetWorkload{
+					Tasks:            []WorkloadTask{},
+					AffectedServices: []AffectedService{},
+				},
+				Safe: false,
 				Findings: []Finding{
 					{Gate: "target_exists", Level: LevelPass, Message: "target node worker-1 exists with role worker"},
 					{Gate: "target_ready", Level: LevelBlocker, Message: "target node worker-1 state is down, expected ready"},
@@ -390,4 +398,34 @@ func TestCheckNodeServiceConvergence(t *testing.T) {
 			assert.Equal(t, tt.expectedFindings, serviceFindings)
 		})
 	}
+}
+
+func TestCheckNodeBuildsTargetWorkloadInventory(t *testing.T) {
+	t.Parallel()
+
+	result := CheckNode(status.Result{
+		Cluster: status.Cluster{LocalState: "active", ControlAvailable: true},
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+			{ID: "w2", Hostname: "worker-2", Role: "worker", State: "ready", Availability: "active"},
+		},
+		DesiredTasks: []status.Task{
+			{ID: "t2", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "rejected"},
+			{ID: "t3", Name: "agent.worker-2", ServiceID: "s3", Service: "agent", NodeID: "w2", Node: "worker-2", DesiredState: "running", State: "running"},
+			{ID: "t1", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+			{ID: "unassigned", Name: "queue.1", ServiceID: "s4", Service: "queue", DesiredState: "running", State: "pending"},
+		},
+	}, "worker-1")
+
+	assert.Equal(t, &TargetWorkload{
+		DesiredRunningTaskCount: 2,
+		Tasks: []WorkloadTask{
+			{ID: "t1", Name: "api.1", ServiceID: "s1", Service: "api", State: "running"},
+			{ID: "t2", Name: "database.1", ServiceID: "s2", Service: "database", State: "rejected"},
+		},
+		AffectedServices: []AffectedService{
+			{ID: "s1", Name: "api"},
+			{ID: "s2", Name: "database"},
+		},
+	}, result.TargetWorkload)
 }

@@ -227,10 +227,45 @@ func runCheck(ctx context.Context, args []string, contextName string, connector 
 			targetName = result.Target.Hostname
 		}
 		_, _ = fmt.Fprintf(stdout, "UNSAFE: target node %s failed checks\n", targetName)
+		writeTargetWorkload(stdout, result.TargetWorkload)
 		return ExitSafetyGate
 	}
 	_, _ = fmt.Fprintf(stdout, "SAFE: target node %s passed checks\n", result.Target.Hostname)
+	writeTargetWorkload(stdout, result.TargetWorkload)
 	return ExitSuccess
+}
+
+func writeTargetWorkload(writer io.Writer, workload *preflight.TargetWorkload) {
+	if workload == nil {
+		return
+	}
+
+	taskNoun := "tasks"
+	if workload.DesiredRunningTaskCount == 1 {
+		taskNoun = "task"
+	}
+	serviceNoun := "services"
+	if len(workload.AffectedServices) == 1 {
+		serviceNoun = "service"
+	}
+	_, _ = fmt.Fprintf(
+		writer,
+		"\nTarget workloads: %d desired-running %s across %d affected %s\n",
+		workload.DesiredRunningTaskCount,
+		taskNoun,
+		len(workload.AffectedServices),
+		serviceNoun,
+	)
+	if len(workload.Tasks) == 0 {
+		return
+	}
+
+	table := tabwriter.NewWriter(writer, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(table, "  TASK NAME\tTASK ID\tSERVICE\tSERVICE ID\tSTATE")
+	for _, task := range workload.Tasks {
+		_, _ = fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s\n", task.Name, task.ID, task.Service, task.ServiceID, task.State)
+	}
+	_ = table.Flush()
 }
 
 func report(writer io.Writer, format string, args ...any) {

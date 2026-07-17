@@ -104,9 +104,16 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
 		},
 		UnhealthyTasks: []status.Task{
-			{ID: "orphaned", Name: "agent.manager-2", Service: "agent", Node: "manager-2", DesiredState: "running", State: "orphaned"},
-			{ID: "failed", Name: "api.2", Service: "api", Node: "worker-1", DesiredState: "running", State: "failed", Error: "exit code 1"},
-			{ID: "rejected", Name: "database.1", Service: "database", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
+			{ID: "orphaned", Name: "agent.manager-2", ServiceID: "s3", Service: "agent", NodeID: "m2", Node: "manager-2", DesiredState: "running", State: "orphaned"},
+			{ID: "failed", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "failed", Error: "exit code 1"},
+			{ID: "rejected", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
+		},
+		DesiredTasks: []status.Task{
+			{ID: "orphaned", Name: "agent.manager-2", ServiceID: "s3", Service: "agent", NodeID: "m2", Node: "manager-2", DesiredState: "running", State: "orphaned"},
+			{ID: "healthy", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+			{ID: "failed", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "failed", Error: "exit code 1"},
+			{ID: "starting", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "starting"},
+			{ID: "rejected", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
 		},
 	}, result)
 }
@@ -132,6 +139,49 @@ func TestInspectorRejectsServiceWithoutTaskCounts(t *testing.T) {
 	_, err := inspector.Inspect(context.Background())
 
 	require.EqualError(t, err, `query Swarm services at "unix:///var/run/docker.sock": service "api" has no task counts`)
+}
+
+func TestInspectorNormalizesDesiredRunningTasks(t *testing.T) {
+	t.Parallel()
+
+	inspector := newInspector(fakeEngine{
+		host: "unix:///var/run/docker.sock",
+		info: system.Info{Swarm: swarm.Info{
+			LocalNodeState:   swarm.LocalNodeStateActive,
+			ControlAvailable: true,
+		}},
+		nodes: []swarm.Node{
+			{
+				ID:          "w1",
+				Spec:        swarm.NodeSpec{Role: swarm.NodeRoleWorker, Availability: swarm.NodeAvailabilityActive},
+				Description: swarm.NodeDescription{Hostname: "worker-1"},
+				Status:      swarm.NodeStatus{State: swarm.NodeStateReady},
+			},
+		},
+		services: []swarm.Service{
+			{
+				ID: "s1",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "api"},
+					Mode:        swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: uint64Pointer(2)}},
+				},
+				ServiceStatus: &swarm.ServiceStatus{RunningTasks: 2, DesiredTasks: 2},
+			},
+		},
+		tasks: []swarm.Task{
+			{ID: "preparing", ServiceID: "s1", Slot: 2, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStatePreparing}},
+			{ID: "running", ServiceID: "s1", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateRunning}},
+			{ID: "historical", ServiceID: "s1", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateShutdown, Status: swarm.TaskStatus{State: swarm.TaskStateFailed}},
+		},
+	})
+
+	result, err := inspector.Inspect(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, []status.Task{
+		{ID: "running", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+		{ID: "preparing", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "preparing"},
+	}, result.DesiredTasks)
 }
 
 type fakeEngine struct {

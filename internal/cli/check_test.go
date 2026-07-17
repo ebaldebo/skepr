@@ -25,6 +25,8 @@ PASS: Swarm manager manager-1 is healthy (ready, active and leader)
 PASS: Swarm manager manager-2 is healthy (ready, active and reachable)
 PASS: all 3 Swarm services are converged
 SAFE: target node worker-1 passed checks
+
+Target workloads: 0 desired-running tasks across 0 affected services
 `, stdout.String())
 }
 
@@ -49,6 +51,8 @@ PASS: target node worker-1 is active
 PASS: connected Docker endpoint is part of an active Swarm
 PASS: connected Docker endpoint provides Swarm manager control
 UNSAFE: target node worker-1 failed checks
+
+Target workloads: 0 desired-running tasks across 0 affected services
 `, stdout.String())
 }
 
@@ -73,6 +77,8 @@ PASS: target node worker-1 exists with role worker
 PASS: target node worker-1 is ready
 PASS: target node worker-1 is active
 UNSAFE: target node worker-1 failed checks
+
+Target workloads: 0 desired-running tasks across 0 affected services
 `, stdout.String())
 }
 
@@ -101,6 +107,8 @@ PASS: connected Docker endpoint is part of an active Swarm
 PASS: connected Docker endpoint provides Swarm manager control
 PASS: Swarm manager manager-1 is healthy (ready, active and leader)
 UNSAFE: target node worker-1 failed checks
+
+Target workloads: 0 desired-running tasks across 0 affected services
 `, stdout.String())
 }
 
@@ -132,6 +140,8 @@ PASS: Swarm manager manager-1 is healthy (ready, active and leader)
 PASS: Swarm manager manager-2 is healthy (ready, active and reachable)
 PASS: Swarm manager manager-3 is healthy (ready, active and reachable)
 UNSAFE: target node manager-1 failed checks
+
+Target workloads: 0 desired-running tasks across 0 affected services
 `, stdout.String())
 }
 
@@ -161,6 +171,8 @@ PASS: connected Docker endpoint provides Swarm manager control
 PASS: Swarm manager manager-1 is healthy (ready, active and leader)
 PASS: Swarm manager manager-2 is healthy (ready, active and reachable)
 UNSAFE: target node manager-2 failed checks
+
+Target workloads: 0 desired-running tasks across 0 affected services
 `, stdout.String())
 }
 
@@ -190,6 +202,41 @@ PASS: target node worker-1 is active
 PASS: connected Docker endpoint is part of an active Swarm
 PASS: connected Docker endpoint provides Swarm manager control
 UNSAFE: target node worker-1 failed checks
+
+Target workloads: 0 desired-running tasks across 0 affected services
+`, stdout.String())
+}
+
+func TestCheckPrintsTargetWorkloadInventory(t *testing.T) {
+	t.Parallel()
+
+	connection := checkInspector{result: status.Result{
+		SchemaVersion: status.SchemaVersion,
+		Endpoint:      "unix:///var/run/docker.sock",
+		Cluster:       status.Cluster{LocalState: "active", ControlAvailable: true},
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+		},
+		DesiredTasks: []status.Task{
+			{ID: "t2", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "rejected"},
+			{ID: "t1", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+		},
+	}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"check", "worker-1"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, `PASS: target node worker-1 exists with role worker
+PASS: target node worker-1 is ready
+PASS: target node worker-1 is active
+PASS: connected Docker endpoint is part of an active Swarm
+PASS: connected Docker endpoint provides Swarm manager control
+SAFE: target node worker-1 passed checks
+
+Target workloads: 2 desired-running tasks across 2 affected services
+  TASK NAME   TASK ID  SERVICE   SERVICE ID  STATE
+  api.1       t1       api       s1          running
+  database.1  t2       database  s2          rejected
 `, stdout.String())
 }
 
@@ -197,7 +244,7 @@ func TestCheckJSONOutput(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
-	exitCode := Run(context.Background(), []string{"check", "worker-1", "--json"}, &fakeConnector{connection: healthyCheckConnection()}, &stdout, &bytes.Buffer{})
+	exitCode := Run(context.Background(), []string{"check", "worker-1", "--json"}, &fakeConnector{connection: workloadCheckConnection()}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, ExitSuccess, exitCode)
 	assert.Equal(t, `{
@@ -210,6 +257,35 @@ func TestCheckJSONOutput(t *testing.T) {
     "role": "worker",
     "state": "ready",
     "availability": "active"
+  },
+  "target_workload": {
+    "desired_running_task_count": 2,
+    "tasks": [
+      {
+        "id": "t1",
+        "name": "api.1",
+        "service_id": "s1",
+        "service": "api",
+        "state": "running"
+      },
+      {
+        "id": "t2",
+        "name": "database.1",
+        "service_id": "s2",
+        "service": "database",
+        "state": "starting"
+      }
+    ],
+    "affected_services": [
+      {
+        "id": "s1",
+        "name": "api"
+      },
+      {
+        "id": "s2",
+        "name": "database"
+      }
+    ]
   },
   "safe": true,
   "findings": [
@@ -269,11 +345,24 @@ func (c checkInspector) Inspect(context.Context) (status.Result, error) {
 func (checkInspector) Close() error { return nil }
 
 func healthyCheckConnection() status.Connection {
+	return checkInspector{result: healthyCheckResult()}
+}
+
+func workloadCheckConnection() status.Connection {
+	result := healthyCheckResult()
+	result.DesiredTasks = []status.Task{
+		{ID: "t2", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "starting"},
+		{ID: "t1", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+	}
+	return checkInspector{result: result}
+}
+
+func healthyCheckResult() status.Result {
 	result, _ := fakeInspector{}.Inspect(context.Background())
 	for i := range result.Services {
 		result.Services[i].RunningTasks = result.Services[i].DesiredTasks
 		result.Services[i].Converged = true
 	}
 	result.UnhealthyTasks = nil
-	return checkInspector{result: result}
+	return result
 }
