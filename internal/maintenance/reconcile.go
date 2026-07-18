@@ -93,7 +93,23 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 
 	reconcileCtx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
-	for _, service := range eligible {
+	currentInventory := inventory
+	for _, candidate := range eligible {
+		var saved preflight.AffectedService
+		for _, affected := range operation.TargetWorkload.AffectedServices {
+			if affected.ID == candidate.ID {
+				saved = affected
+				break
+			}
+		}
+		currentEligible, err := eligibleReconciliationServices([]preflight.AffectedService{saved}, currentInventory.Services)
+		if err != nil {
+			return operation, &ReconcileSafetyError{Err: err}
+		}
+		if len(currentEligible) == 0 {
+			continue
+		}
+		service := currentEligible[0]
 		if err := r.transitionAndSave(&operation, PhaseReconciling); err != nil {
 			return operation, err
 		}
@@ -110,7 +126,8 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 		if err := r.Client.ForceUpdateService(reconcileCtx, service.ID); err != nil {
 			return r.fail(operation, fmt.Errorf("force update service %s: %w", service.Name, err))
 		}
-		if err := r.waitForService(reconcileCtx, operation, service.ID); err != nil {
+		currentInventory, err = r.waitForService(reconcileCtx, operation, service.ID)
+		if err != nil {
 			return r.fail(operation, fmt.Errorf("wait for service %s: %w", service.Name, err))
 		}
 		completedAt := r.now()
@@ -171,25 +188,25 @@ func eligibleReconciliationServices(saved []preflight.AffectedService, current [
 	return eligible, nil
 }
 
-func (r Reconciler) waitForService(ctx context.Context, operation Operation, serviceID string) error {
+func (r Reconciler) waitForService(ctx context.Context, operation Operation, serviceID string) (status.Result, error) {
 	for {
 		inventory, err := r.Client.Inspect(ctx)
 		if err != nil {
-			return err
+			return status.Result{}, err
 		}
 		if err := validateReconciliationState(operation, inventory); err != nil {
-			return err
+			return status.Result{}, err
 		}
 		for _, service := range inventory.Services {
 			if service.ID == serviceID && service.Converged {
-				return nil
+				return inventory, nil
 			}
 		}
 		timer := time.NewTimer(r.pollInterval())
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			return status.Result{}, ctx.Err()
 		case <-timer.C:
 		}
 	}

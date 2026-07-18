@@ -413,7 +413,7 @@ func runMaintenanceBegin(ctx context.Context, args []string, contextName string,
 	}
 	operation, err := beginner.Begin(ctx, flags.Arg(0))
 	if err != nil {
-		return reportMaintenanceBeginError(err, stdout, stderr)
+		return reportMaintenanceBeginError(err, *jsonOutput, stdout, stderr)
 	}
 	result := struct {
 		SchemaVersion int                   `json:"schema_version"`
@@ -461,9 +461,19 @@ func normalizeBeginArgs(args []string) []string {
 	return append(flagArgs, positional...)
 }
 
-func reportMaintenanceBeginError(err error, stdout, stderr io.Writer) int {
+func reportMaintenanceBeginError(err error, jsonOutput bool, stdout, stderr io.Writer) int {
 	var safety *maintenance.SafetyError
 	if errors.As(err, &safety) {
+		if jsonOutput {
+			encoder := json.NewEncoder(stdout)
+			encoder.SetEscapeHTML(false)
+			encoder.SetIndent("", "  ")
+			if err := encoder.Encode(safety.Result); err != nil {
+				report(stderr, "write maintenance begin output: %v\n", err)
+				return ExitDockerConnection
+			}
+			return ExitSafetyGate
+		}
 		for _, finding := range safety.Result.Findings {
 			if finding.Level == preflight.LevelBlocker {
 				_, _ = fmt.Fprintf(stdout, "BLOCKER: %s\n", finding.Message)

@@ -46,6 +46,26 @@ func TestReconcileRestartsOnlyAffectedStalledSingleton(t *testing.T) {
 	assert.Equal(t, ReconciliationConverged, result.ReconciliationAttempts[0].Result)
 }
 
+func TestReconcileRevalidatesEachServiceBeforeMutation(t *testing.T) {
+	operation := reconciliationOperation()
+	operation.TargetWorkload.AffectedServices = append(operation.TargetWorkload.AffectedServices, preflight.AffectedService{
+		ID: "second-id", Name: "cache", Mode: "replicated", DesiredTasks: 1, Singleton: true,
+	})
+	client := &changingReconcileClient{}
+
+	_, err := (Reconciler{
+		Client:       client,
+		Store:        &reconcileStore{operation: operation},
+		Timeout:      5 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	}).Reconcile(context.Background(), operation.ID)
+
+	var safetyError *ReconcileSafetyError
+	require.ErrorAs(t, err, &safetyError)
+	assert.ErrorContains(t, err, "affected service cache is 1/2 in replicated mode, expected a replicated singleton at 0/1")
+	assert.Equal(t, []string{"affected-id"}, client.forceUpdates)
+}
+
 func TestReconcileRejectsUnsafeLiveStateWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -112,6 +132,29 @@ type reconcileClient struct {
 	inspectCalls int
 	forceUpdates []string
 	forceErr     error
+}
+
+type changingReconcileClient struct {
+	forceUpdates []string
+}
+
+func (c *changingReconcileClient) Inspect(context.Context) (status.Result, error) {
+	result := reconciliationInventory()
+	result.Services = append(result.Services, status.Service{
+		ID: "second-id", Name: "cache", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false,
+	})
+	if len(c.forceUpdates) > 0 {
+		result.Services[0].RunningTasks = 1
+		result.Services[0].Converged = true
+		result.Services[2].RunningTasks = 1
+		result.Services[2].DesiredTasks = 2
+	}
+	return result, nil
+}
+
+func (c *changingReconcileClient) ForceUpdateService(_ context.Context, serviceID string) error {
+	c.forceUpdates = append(c.forceUpdates, serviceID)
+	return nil
 }
 
 func (c *reconcileClient) Inspect(context.Context) (status.Result, error) {

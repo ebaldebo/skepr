@@ -151,6 +151,32 @@ func TestMaintenanceBeginRefusesUnsafePreflight(t *testing.T) {
 	assert.Nil(t, operation)
 }
 
+func TestMaintenanceBeginJSONReportsUnsafePreflight(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	unsafe := healthyMaintenanceInventory()
+	unsafe.Nodes[1].State = "down"
+	connection := &maintenanceConnection{inventories: []status.Result{unsafe}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "begin", "worker-1", "--json"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	var result preflight.Result
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	assert.Equal(t, status.SchemaVersion, result.SchemaVersion)
+	assert.False(t, result.Safe)
+	assert.Contains(t, result.Findings, preflight.Finding{
+		Gate:    "target_ready",
+		Level:   preflight.LevelBlocker,
+		Message: "target node worker-1 state is down, expected ready",
+	})
+	assert.NotContains(t, stdout.String(), "\x1b")
+	assert.Empty(t, stderr.String())
+	assert.Empty(t, connection.updates)
+}
+
 func TestMaintenanceBeginRefusesActiveOperation(t *testing.T) {
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)
