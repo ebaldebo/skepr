@@ -266,6 +266,18 @@ func writeTargetWorkload(writer io.Writer, workload *preflight.TargetWorkload) {
 		_, _ = fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s\n", task.Name, task.ID, task.Service, task.ServiceID, task.State)
 	}
 	_ = table.Flush()
+
+	_, _ = fmt.Fprintln(writer, "\nAffected services:")
+	table = tabwriter.NewWriter(writer, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(table, "  SERVICE NAME\tSERVICE ID\tCLASS\tRUNNING/DESIRED")
+	for _, service := range workload.AffectedServices {
+		class := service.Mode
+		if service.Singleton {
+			class = "singleton"
+		}
+		_, _ = fmt.Fprintf(table, "  %s\t%s\t%s\t%d/%d\n", service.Name, service.ID, class, service.RunningTasks, service.DesiredTasks)
+	}
+	_ = table.Flush()
 }
 
 func report(writer io.Writer, format string, args ...any) {

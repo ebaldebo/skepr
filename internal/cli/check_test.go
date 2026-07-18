@@ -217,6 +217,10 @@ func TestCheckPrintsTargetWorkloadInventory(t *testing.T) {
 		Nodes: []status.Node{
 			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
 		},
+		Services: []status.Service{
+			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 1, DesiredTasks: 1, Converged: true},
+		},
 		DesiredTasks: []status.Task{
 			{ID: "t2", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "rejected"},
 			{ID: "t1", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
@@ -231,12 +235,18 @@ PASS: target node worker-1 is ready
 PASS: target node worker-1 is active
 PASS: connected Docker endpoint is part of an active Swarm
 PASS: connected Docker endpoint provides Swarm manager control
+PASS: all 2 Swarm services are converged
 SAFE: target node worker-1 passed checks
 
 Target workloads: 2 desired-running tasks across 2 affected services
   TASK NAME   TASK ID  SERVICE   SERVICE ID  STATE
   api.1       t1       api       s1          running
   database.1  t2       database  s2          rejected
+
+Affected services:
+  SERVICE NAME  SERVICE ID  CLASS       RUNNING/DESIRED
+  api           s1          replicated  2/2
+  database      s2          singleton   1/1
 `, stdout.String())
 }
 
@@ -279,11 +289,19 @@ func TestCheckJSONOutput(t *testing.T) {
     "affected_services": [
       {
         "id": "s1",
-        "name": "api"
+        "name": "api",
+        "mode": "replicated",
+        "running_tasks": 2,
+        "desired_tasks": 2,
+        "singleton": false
       },
       {
         "id": "s2",
-        "name": "database"
+        "name": "database",
+        "mode": "replicated",
+        "running_tasks": 1,
+        "desired_tasks": 1,
+        "singleton": true
       }
     ]
   },

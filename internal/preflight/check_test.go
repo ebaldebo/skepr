@@ -429,3 +429,31 @@ func TestCheckNodeBuildsTargetWorkloadInventory(t *testing.T) {
 		},
 	}, result.TargetWorkload)
 }
+
+func TestCheckNodeClassifiesAffectedServices(t *testing.T) {
+	t.Parallel()
+
+	result := CheckNode(status.Result{
+		Cluster: status.Cluster{LocalState: "active", ControlAvailable: true},
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+		},
+		Services: []status.Service{
+			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 3, DesiredTasks: 3, Converged: true},
+			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 1, DesiredTasks: 1, Converged: true},
+			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 2, DesiredTasks: 2, Converged: true},
+			{ID: "s4", Name: "unaffected", Mode: "replicated", RunningTasks: 1, DesiredTasks: 1, Converged: true},
+		},
+		DesiredTasks: []status.Task{
+			{ID: "t1", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+			{ID: "t2", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+			{ID: "t3", Name: "agent.worker-1", ServiceID: "s3", Service: "agent", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+		},
+	}, "worker-1")
+
+	assert.Equal(t, []AffectedService{
+		{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 2, DesiredTasks: 2},
+		{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 3, DesiredTasks: 3},
+		{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 1, DesiredTasks: 1, Singleton: true},
+	}, result.TargetWorkload.AffectedServices)
+}

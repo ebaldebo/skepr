@@ -30,8 +30,12 @@ type WorkloadTask struct {
 }
 
 type AffectedService struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Mode         string `json:"mode"`
+	RunningTasks uint64 `json:"running_tasks"`
+	DesiredTasks uint64 `json:"desired_tasks"`
+	Singleton    bool   `json:"singleton"`
 }
 
 type TargetWorkload struct {
@@ -69,7 +73,7 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 			Level:   LevelPass,
 			Message: fmt.Sprintf("target node %s exists with role %s", node.Hostname, node.Role),
 		})
-		result.TargetWorkload = buildTargetWorkload(node, inventory.DesiredTasks)
+		result.TargetWorkload = buildTargetWorkload(node, inventory.DesiredTasks, inventory.Services)
 		result.addStateFinding(node)
 		result.addAvailabilityFinding(node)
 		result.addTargetLeadershipFinding(node)
@@ -92,10 +96,16 @@ func CheckNode(inventory status.Result, requestedNode string) Result {
 	return result
 }
 
-func buildTargetWorkload(target status.Node, tasks []status.Task) *TargetWorkload {
+func buildTargetWorkload(target status.Node, tasks []status.Task, services []status.Service) *TargetWorkload {
 	workload := &TargetWorkload{
 		Tasks:            []WorkloadTask{},
 		AffectedServices: []AffectedService{},
+	}
+	servicesByID := make(map[string]status.Service, len(services))
+	servicesByName := make(map[string]status.Service, len(services))
+	for _, service := range services {
+		servicesByID[service.ID] = service
+		servicesByName[service.Name] = service
 	}
 	affectedServices := make(map[string]AffectedService)
 	for _, task := range tasks {
@@ -121,7 +131,20 @@ func buildTargetWorkload(target status.Node, tasks []status.Task) *TargetWorkloa
 		if serviceKey == "" {
 			serviceKey = task.Service
 		}
-		affectedServices[serviceKey] = AffectedService{ID: task.ServiceID, Name: task.Service}
+		affectedService := AffectedService{ID: task.ServiceID, Name: task.Service}
+		service, ok := servicesByID[task.ServiceID]
+		if !ok {
+			service, ok = servicesByName[task.Service]
+		}
+		if ok {
+			affectedService.ID = service.ID
+			affectedService.Name = service.Name
+			affectedService.Mode = service.Mode
+			affectedService.RunningTasks = service.RunningTasks
+			affectedService.DesiredTasks = service.DesiredTasks
+			affectedService.Singleton = service.Mode == "replicated" && service.DesiredTasks == 1
+		}
+		affectedServices[serviceKey] = affectedService
 	}
 
 	sort.Slice(workload.Tasks, func(a, b int) bool {
