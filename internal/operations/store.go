@@ -32,10 +32,14 @@ type Record struct {
 
 type Store struct {
 	operationsDir string
+	locksDir      string
 }
 
 func NewStore(stateDir string) *Store {
-	return &Store{operationsDir: filepath.Join(stateDir, "operations")}
+	return &Store{
+		operationsDir: filepath.Join(stateDir, "operations"),
+		locksDir:      filepath.Join(stateDir, "locks"),
+	}
 }
 
 func (s *Store) Save(record Record) error {
