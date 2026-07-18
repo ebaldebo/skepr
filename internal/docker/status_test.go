@@ -187,28 +187,40 @@ func TestInspectorNormalizesDesiredRunningTasks(t *testing.T) {
 func TestInspectorUpdatesNodeAvailability(t *testing.T) {
 	t.Parallel()
 
-	engine := &nodeUpdateEngine{
-		fakeEngine: fakeEngine{host: "unix:///var/run/docker.sock"},
-		node: swarm.Node{
-			ID:   "worker-id",
-			Meta: swarm.Meta{Version: swarm.Version{Index: 7}},
-			Spec: swarm.NodeSpec{
-				Annotations:  swarm.Annotations{Labels: map[string]string{"storage": "shared"}},
-				Role:         swarm.NodeRoleWorker,
-				Availability: swarm.NodeAvailabilityActive,
-			},
-		},
+	tests := []struct {
+		name         string
+		availability string
+		want         swarm.NodeAvailability
+	}{
+		{name: "drain", availability: "drain", want: swarm.NodeAvailabilityDrain},
+		{name: "activate", availability: "active", want: swarm.NodeAvailabilityActive},
 	}
-	inspector := newInspector(engine)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			engine := &nodeUpdateEngine{
+				fakeEngine: fakeEngine{host: "unix:///var/run/docker.sock"},
+				node: swarm.Node{
+					ID:   "worker-id",
+					Meta: swarm.Meta{Version: swarm.Version{Index: 7}},
+					Spec: swarm.NodeSpec{
+						Annotations:  swarm.Annotations{Labels: map[string]string{"storage": "shared"}},
+						Role:         swarm.NodeRoleWorker,
+						Availability: swarm.NodeAvailabilityPause,
+					},
+				},
+			}
+			inspector := newInspector(engine)
 
-	err := inspector.UpdateNodeAvailability(context.Background(), "worker-id", "drain")
+			err := inspector.UpdateNodeAvailability(context.Background(), "worker-id", test.availability)
 
-	require.NoError(t, err)
-	assert.Equal(t, "worker-id", engine.updatedNodeID)
-	assert.Equal(t, swarm.Version{Index: 7}, engine.updateOptions.Version)
-	assert.Equal(t, swarm.NodeRoleWorker, engine.updateOptions.Spec.Role)
-	assert.Equal(t, map[string]string{"storage": "shared"}, engine.updateOptions.Spec.Labels)
-	assert.Equal(t, swarm.NodeAvailabilityDrain, engine.updateOptions.Spec.Availability)
+			require.NoError(t, err)
+			assert.Equal(t, "worker-id", engine.updatedNodeID)
+			assert.Equal(t, swarm.Version{Index: 7}, engine.updateOptions.Version)
+			assert.Equal(t, swarm.NodeRoleWorker, engine.updateOptions.Spec.Role)
+			assert.Equal(t, map[string]string{"storage": "shared"}, engine.updateOptions.Spec.Labels)
+			assert.Equal(t, test.want, engine.updateOptions.Spec.Availability)
+		})
+	}
 }
 
 func TestInspectorForceUpdatesService(t *testing.T) {

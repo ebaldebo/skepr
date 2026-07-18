@@ -60,6 +60,8 @@ func runMaintenance(ctx context.Context, args []string, contextName string, conn
 	switch args[0] {
 	case "begin":
 		return runMaintenanceBegin(ctx, args[1:], contextName, connector, stdout, stderr)
+	case "finish":
+		return runMaintenanceFinish(ctx, args[1:], contextName, connector, stdout, stderr)
 	case "reconcile":
 		return runMaintenanceReconcile(ctx, args[1:], contextName, connector, stdout, stderr)
 	case "show":
@@ -68,6 +70,86 @@ func runMaintenance(ctx context.Context, args []string, contextName string, conn
 		report(stderr, "usage: skepr [--context name] maintenance <command>\n")
 		return ExitInvalidUsage
 	}
+}
+
+func runMaintenanceFinish(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("maintenance finish", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "emit JSON output")
+	timeout := flags.Duration("timeout", 5*time.Minute, "maintenance finish timeout")
+	args = normalizeBeginArgs(args)
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 || *timeout <= 0 {
+		if err == nil {
+			report(stderr, "usage: skepr [--context name] maintenance finish <operation-id> [--timeout duration] [--json]\n")
+		}
+		return ExitInvalidUsage
+	}
+
+	connection, err := connector.Connect(ctx, contextName)
+	if err != nil {
+		report(stderr, "configure Docker connection: %v\n", err)
+		return ExitDockerConnection
+	}
+	defer func() { _ = connection.Close() }()
+	maintenanceConnection, ok := connection.(status.MaintenanceConnection)
+	if !ok {
+		report(stderr, "Docker connection does not support Swarm node maintenance\n")
+		return ExitDockerConnection
+	}
+	stateDir, err := operations.DefaultStateDir()
+	if err != nil {
+		report(stderr, "configure operation state: %v\n", err)
+		return ExitInvalidUsage
+	}
+	finisher := maintenance.Finisher{
+		Client:       maintenanceConnection,
+		Store:        operations.NewStore(stateDir),
+		Timeout:      *timeout,
+		PollInterval: time.Second,
+		Progress: func(operation maintenance.Operation) {
+			_, _ = fmt.Fprintf(stderr, "operation %s: %s\n", operation.ID, operation.Phase)
+		},
+	}
+	operation, err := finisher.Finish(ctx, flags.Arg(0))
+	if err != nil {
+		return reportMaintenanceFinishError(err, stderr)
+	}
+	result := struct {
+		SchemaVersion int                   `json:"schema_version"`
+		Operation     maintenance.Operation `json:"operation"`
+	}{SchemaVersion: maintenance.OperationSchemaVersion, Operation: operation}
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			report(stderr, "write maintenance finish output: %v\n", err)
+			return ExitDockerConnection
+		}
+		return ExitSuccess
+	}
+	_, err = fmt.Fprintf(stdout, "Operation: %s\nTarget: %s (%s)\nPhase: %s\n", operation.ID, operation.Target.Hostname, operation.Target.ID, operation.Phase)
+	if err != nil {
+		report(stderr, "write maintenance finish output: %v\n", err)
+		return ExitDockerConnection
+	}
+	return ExitSuccess
+}
+
+func reportMaintenanceFinishError(err error, stderr io.Writer) int {
+	var safety *maintenance.FinishSafetyError
+	if errors.As(err, &safety) {
+		report(stderr, "maintenance finish blocked: %v\n", safety)
+		return ExitSafetyGate
+	}
+	var finishError *maintenance.FinishError
+	if errors.As(err, &finishError) {
+		report(stderr, "%v\n", finishError)
+		report(stderr, "RECOVERY: node activation may have occurred; inspect operation %s and never redrain automatically\n", finishError.OperationID)
+		return ExitPartialMutation
+	}
+	report(stderr, "maintenance finish: %v\n", err)
+	return ExitDockerConnection
 }
 
 func runMaintenanceReconcile(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {

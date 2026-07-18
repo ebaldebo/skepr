@@ -98,6 +98,36 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Contains(t, showOutput.String(), "Phase: maintenance-ready")
 	assert.Contains(t, showOutput.String(), "Live target: ready drain")
 	assert.Contains(t, showOutput.String(), "Live target tasks: 0 desired-running")
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	operation, err := store.LatestActive()
+	require.NoError(t, err)
+	require.NotNil(t, operation)
+
+	var finishOutput bytes.Buffer
+	var finishErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"maintenance", "finish", operation.ID, "--timeout", "30s"}, connector, &finishOutput, &finishErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, finishErrors.String())
+	assert.Contains(t, finishOutput.String(), "Phase: completed")
+
+	inventory, err = connection.Inspect(context.Background())
+	require.NoError(t, err)
+	for _, node := range inventory.Nodes {
+		if node.Hostname == "worker-1" {
+			assert.Equal(t, "active", node.Availability)
+		}
+	}
+	persisted, err := store.Load(operation.ID)
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
+
+	var secondBeginOutput bytes.Buffer
+	var secondBeginErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"maintenance", "begin", "worker-2", "--timeout", "30s"}, connector, &secondBeginOutput, &secondBeginErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, secondBeginErrors.String())
+	operation, err = store.LatestActive()
+	require.NoError(t, err)
+	require.NotNil(t, operation)
+	assert.Equal(t, "worker-2", operation.Target.Hostname)
 
 	engine, err := mobyclient.New(mobyclient.WithHost(endpoint), mobyclient.WithAPIVersionNegotiation())
 	require.NoError(t, err)
@@ -133,10 +163,6 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
-	operation, err := store.LatestActive()
-	require.NoError(t, err)
-	require.NotNil(t, operation)
 	operation.Phase = maintenance.PhaseWaitingServices
 	operation.PhaseTimestamps[maintenance.PhaseWaitingServices] = time.Now().UTC()
 	operation.TargetWorkload = preflight.TargetWorkload{AffectedServices: []preflight.AffectedService{
@@ -156,7 +182,7 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	updated, err := engine.ServiceInspect(context.Background(), created.ID, mobyclient.ServiceInspectOptions{})
 	require.NoError(t, err)
 	assert.Greater(t, updated.Service.Version.Index, beforeReconcile.Service.Version.Index, reconcileErrors.String())
-	persisted, err := store.Load(operation.ID)
+	persisted, err = store.Load(operation.ID)
 	require.NoError(t, err)
 	assert.Equal(t, maintenance.PhaseWaitingServices, persisted.Phase)
 	require.Len(t, persisted.ReconciliationAttempts, 1)

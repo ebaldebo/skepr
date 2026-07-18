@@ -339,6 +339,73 @@ func TestMaintenanceReconcileRestartsAffectedSingleton(t *testing.T) {
 	assert.Equal(t, maintenance.ReconciliationConverged, persisted.ReconciliationAttempts[0].Result)
 }
 
+func TestMaintenanceFinishActivatesNodeAndCompletesOperation(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	recordedAt := time.Date(2026, time.July, 18, 16, 0, 0, 0, time.UTC)
+	require.NoError(t, store.Save(operations.Record{
+		SchemaVersion:    operations.SchemaVersion,
+		ID:               "operation-1",
+		ClusterID:        "cluster-1",
+		Target:           status.Node{ID: "worker-id", Hostname: "worker-1", Role: "worker"},
+		Phase:            maintenance.PhaseMaintenanceReady,
+		PhaseTimestamps:  map[maintenance.Phase]time.Time{maintenance.PhaseMaintenanceReady: recordedAt},
+		MutationOccurred: true,
+	}))
+	returned := healthyMaintenanceInventory()
+	returned.Nodes[1].Availability = "drain"
+	active := healthyMaintenanceInventory()
+	connection := &maintenanceConnection{inventories: []status.Result{returned, active}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "finish", "operation-1"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, "Operation: operation-1\nTarget: worker-1 (worker-id)\nPhase: completed\n", stdout.String())
+	assert.Equal(t, []maintenanceAvailabilityUpdate{{nodeID: "worker-id", availability: "active"}}, connection.updates)
+	assert.Contains(t, stderr.String(), "operation operation-1: activating\n")
+	assert.Contains(t, stderr.String(), "operation operation-1: completed\n")
+	persisted, err := store.Load("operation-1")
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
+}
+
+func TestMaintenanceFinishActivationFailureRequiresRecovery(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	require.NoError(t, store.Save(operations.Record{
+		SchemaVersion:    operations.SchemaVersion,
+		ID:               "operation-1",
+		ClusterID:        "cluster-1",
+		Target:           status.Node{ID: "worker-id", Hostname: "worker-1", Role: "worker"},
+		Phase:            maintenance.PhaseMaintenanceReady,
+		PhaseTimestamps:  map[maintenance.Phase]time.Time{maintenance.PhaseMaintenanceReady: time.Now()},
+		MutationOccurred: true,
+	}))
+	returned := healthyMaintenanceInventory()
+	returned.Nodes[1].Availability = "drain"
+	connection := &maintenanceConnection{
+		inventories: []status.Result{returned},
+		updateErr:   fmt.Errorf("manager lost the update response"),
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "finish", "operation-1"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitPartialMutation, exitCode)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), "RECOVERY: node activation may have occurred")
+	assert.Contains(t, stderr.String(), "never redrain automatically")
+	persisted, err := store.Load("operation-1")
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseActivating, persisted.Phase)
+	assert.Contains(t, persisted.LastError, "manager lost the update response")
+}
+
 type maintenanceConnection struct {
 	inventories  []status.Result
 	inspectCalls int
