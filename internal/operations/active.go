@@ -59,3 +59,32 @@ func (s *Store) EnsureNoActiveOperation(clusterID string) error {
 		Phase:       active.Phase,
 	}
 }
+
+func (s *Store) LatestActive() (*Record, error) {
+	entries, err := os.ReadDir(s.operationsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read operation directory: %w", err)
+	}
+	var latest *Record
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		record, err := s.Load(id)
+		if err != nil {
+			return nil, err
+		}
+		if record.Phase == maintenance.PhaseCompleted {
+			continue
+		}
+		if latest == nil || record.UpdatedAt.After(latest.UpdatedAt) || record.UpdatedAt.Equal(latest.UpdatedAt) && record.ID > latest.ID {
+			current := record
+			latest = &current
+		}
+	}
+	return latest, nil
+}

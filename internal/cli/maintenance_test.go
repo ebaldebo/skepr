@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ebaldebo/skepr/internal/maintenance"
 	"github.com/ebaldebo/skepr/internal/operations"
+	"github.com/ebaldebo/skepr/internal/preflight"
 	"github.com/ebaldebo/skepr/internal/status"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -201,11 +203,111 @@ func TestMaintenanceBeginJSONOutput(t *testing.T) {
 	assert.Contains(t, stderr.String(), "maintenance-ready")
 }
 
+func TestMaintenanceShowReportsDurableAndLiveState(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	require.NoError(t, store.Save(operations.Record{
+		SchemaVersion:    operations.SchemaVersion,
+		ID:               "operation-1",
+		ClusterID:        "cluster-1",
+		Endpoint:         "ssh://manager-1",
+		Target:           status.Node{ID: "worker-id", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+		TargetWorkload:   maintenanceWorkloadSnapshot(),
+		Phase:            maintenance.PhaseWaitingServices,
+		MutationOccurred: true,
+		LastError:        "wait for affected services: context deadline exceeded",
+	}))
+	live := healthyMaintenanceInventory()
+	live.Nodes[1].Availability = "drain"
+	live.DesiredTasks = nil
+	live.Services[0].RunningTasks = 0
+	live.Services[0].Converged = false
+	connection := &maintenanceConnection{inventories: []status.Result{live}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "show", "operation-1"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Empty(t, stderr.String())
+	assert.Equal(t, `Operation: operation-1
+Phase: waiting-services
+Cluster: cluster-1
+Target: worker-1 (worker-id) worker
+Mutation occurred: yes
+Last error: wait for affected services: context deadline exceeded
+Live target: ready drain
+Live target tasks: 0 desired-running
+
+Affected services:
+  SERVICE   SERVICE ID  CLASS      RUNNING/DESIRED  STATE
+  database  service-1   singleton  0/1              unconverged
+`, stdout.String())
+}
+
+func TestMaintenanceShowJSONUsesLatestActiveOperation(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	baseTime := time.Date(2026, time.July, 18, 14, 0, 0, 0, time.UTC)
+	for _, record := range []operations.Record{
+		{SchemaVersion: operations.SchemaVersion, ID: "older-active", ClusterID: "cluster-2", Phase: maintenance.PhaseEvacuating, UpdatedAt: baseTime},
+		{SchemaVersion: operations.SchemaVersion, ID: "latest-active", ClusterID: "cluster-1", Target: status.Node{ID: "worker-id", Hostname: "worker-1", Role: "worker"}, Phase: maintenance.PhaseMaintenanceReady, UpdatedAt: baseTime.Add(time.Minute)},
+		{SchemaVersion: operations.SchemaVersion, ID: "newer-completed", ClusterID: "cluster-1", Phase: maintenance.PhaseCompleted, UpdatedAt: baseTime.Add(2 * time.Minute)},
+	} {
+		require.NoError(t, store.Save(record))
+	}
+	connection := &maintenanceConnection{inventories: []status.Result{healthyMaintenanceInventory()}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "show", "--json"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Empty(t, stderr.String())
+	var result maintenance.ShowResult
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	assert.Equal(t, maintenance.OperationSchemaVersion, result.SchemaVersion)
+	assert.Equal(t, "latest-active", result.Operation.ID)
+	require.NotNil(t, result.Live)
+	assert.True(t, result.Live.ClusterMatchesOperation)
+	assert.NotContains(t, stdout.String(), "\x1b")
+}
+
+func TestMaintenanceShowStillReportsRecordWhenDockerIsUnavailable(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	require.NoError(t, store.Save(operations.Record{
+		SchemaVersion: operations.SchemaVersion,
+		ID:            "operation-1",
+		ClusterID:     "cluster-1",
+		Target:        status.Node{ID: "worker-id", Hostname: "worker-1", Role: "worker"},
+		Phase:         maintenance.PhaseEvacuating,
+	}))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "show", "operation-1"}, maintenanceConnectorError{}, &stdout, &stderr)
+
+	assert.Equal(t, ExitDockerConnection, exitCode)
+	assert.Empty(t, stderr.String())
+	assert.Contains(t, stdout.String(), "Operation: operation-1\n")
+	assert.Contains(t, stdout.String(), "Live state: unavailable: manager endpoint is unreachable\n")
+}
+
 type maintenanceConnection struct {
 	inventories  []status.Result
 	inspectCalls int
 	updates      []maintenanceAvailabilityUpdate
 	updateErr    error
+}
+
+type maintenanceConnectorError struct{}
+
+func (maintenanceConnectorError) Connect(context.Context, string) (status.Connection, error) {
+	return nil, fmt.Errorf("manager endpoint is unreachable")
 }
 
 type maintenanceAvailabilityUpdate struct {
@@ -248,6 +350,18 @@ func healthyMaintenanceInventory() status.Result {
 		},
 		DesiredTasks: []status.Task{
 			{ID: "task-1", Name: "database.1", ServiceID: "service-1", Service: "database", NodeID: "worker-id", Node: "worker-1", DesiredState: "running", State: "running"},
+		},
+	}
+}
+
+func maintenanceWorkloadSnapshot() preflight.TargetWorkload {
+	return preflight.TargetWorkload{
+		DesiredRunningTaskCount: 1,
+		Tasks: []preflight.WorkloadTask{
+			{ID: "task-1", Name: "database.1", ServiceID: "service-1", Service: "database", State: "running"},
+		},
+		AffectedServices: []preflight.AffectedService{
+			{ID: "service-1", Name: "database", Mode: "replicated", RunningTasks: 1, DesiredTasks: 1, Singleton: true},
 		},
 	}
 }

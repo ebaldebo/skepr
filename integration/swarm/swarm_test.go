@@ -82,4 +82,12 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "drain", workerAvailability)
+
+	var showOutput bytes.Buffer
+	var showErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"maintenance", "show"}, connector, &showOutput, &showErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, showErrors.String())
+	assert.Contains(t, showOutput.String(), "Phase: maintenance-ready")
+	assert.Contains(t, showOutput.String(), "Live target: ready drain")
+	assert.Contains(t, showOutput.String(), "Live target tasks: 0 desired-running")
 }

@@ -53,11 +53,159 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 }
 
 func runMaintenance(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "begin" {
-		report(stderr, "usage: skepr [--context name] maintenance begin <node> [--timeout duration] [--json]\n")
+	if len(args) == 0 {
+		report(stderr, "usage: skepr [--context name] maintenance <command>\n")
 		return ExitInvalidUsage
 	}
-	return runMaintenanceBegin(ctx, args[1:], contextName, connector, stdout, stderr)
+	switch args[0] {
+	case "begin":
+		return runMaintenanceBegin(ctx, args[1:], contextName, connector, stdout, stderr)
+	case "show":
+		return runMaintenanceShow(ctx, args[1:], contextName, connector, stdout, stderr)
+	default:
+		report(stderr, "usage: skepr [--context name] maintenance <command>\n")
+		return ExitInvalidUsage
+	}
+}
+
+func runMaintenanceShow(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("maintenance show", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "emit JSON output")
+	if len(args) == 2 && args[1] == "--json" {
+		args = []string{"--json", args[0]}
+	}
+	if err := flags.Parse(args); err != nil || flags.NArg() > 1 {
+		if err == nil {
+			report(stderr, "usage: skepr [--context name] maintenance show [operation-id] [--json]\n")
+		}
+		return ExitInvalidUsage
+	}
+	stateDir, err := operations.DefaultStateDir()
+	if err != nil {
+		report(stderr, "configure operation state: %v\n", err)
+		return ExitInvalidUsage
+	}
+	store := operations.NewStore(stateDir)
+	var operation maintenance.Operation
+	if flags.NArg() == 1 {
+		operation, err = store.Load(flags.Arg(0))
+	} else {
+		active, activeErr := store.LatestActive()
+		err = activeErr
+		if active != nil {
+			operation = *active
+		}
+		if err == nil && active == nil {
+			err = fmt.Errorf("no active maintenance operation found")
+		}
+	}
+	if err != nil {
+		report(stderr, "load maintenance operation: %v\n", err)
+		return ExitInvalidUsage
+	}
+
+	result := maintenance.ShowResult{SchemaVersion: maintenance.OperationSchemaVersion, Operation: operation}
+	connection, connectionErr := connector.Connect(ctx, contextName)
+	if connectionErr != nil {
+		result.LiveError = connectionErr.Error()
+	} else {
+		inventory, inspectErr := connection.Inspect(ctx)
+		_ = connection.Close()
+		if inspectErr != nil {
+			result.LiveError = inspectErr.Error()
+		} else {
+			live := maintenance.BuildLiveOperationState(operation, inventory)
+			result.Live = &live
+		}
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			report(stderr, "write maintenance show output: %v\n", err)
+			return ExitDockerConnection
+		}
+	} else if err := writeMaintenanceShow(stdout, result); err != nil {
+		report(stderr, "write maintenance show output: %v\n", err)
+		return ExitDockerConnection
+	}
+	if result.LiveError != "" {
+		return ExitDockerConnection
+	}
+	return ExitSuccess
+}
+
+func writeMaintenanceShow(writer io.Writer, result maintenance.ShowResult) error {
+	mutation := "no"
+	if result.Operation.MutationOccurred {
+		mutation = "yes"
+	}
+	if _, err := fmt.Fprintf(
+		writer,
+		"Operation: %s\nPhase: %s\nCluster: %s\nTarget: %s (%s) %s\nMutation occurred: %s\n",
+		result.Operation.ID,
+		result.Operation.Phase,
+		result.Operation.ClusterID,
+		result.Operation.Target.Hostname,
+		result.Operation.Target.ID,
+		result.Operation.Target.Role,
+		mutation,
+	); err != nil {
+		return err
+	}
+	if result.Operation.LastError != "" {
+		if _, err := fmt.Fprintf(writer, "Last error: %s\n", result.Operation.LastError); err != nil {
+			return err
+		}
+	}
+	if result.LiveError != "" {
+		_, err := fmt.Fprintf(writer, "Live state: unavailable: %s\n", result.LiveError)
+		return err
+	}
+	if result.Live == nil {
+		return nil
+	}
+	if !result.Live.ClusterMatchesOperation {
+		if _, err := fmt.Fprintf(writer, "Live cluster: %s (operation cluster mismatch)\n", result.Live.ClusterID); err != nil {
+			return err
+		}
+	}
+	if result.Live.Target == nil {
+		if _, err := io.WriteString(writer, "Live target: missing\n"); err != nil {
+			return err
+		}
+	} else if _, err := fmt.Fprintf(writer, "Live target: %s %s\n", result.Live.Target.State, result.Live.Target.Availability); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "Live target tasks: %d desired-running\n", result.Live.TargetDesiredTasks); err != nil {
+		return err
+	}
+	if len(result.Live.AffectedServices) == 0 {
+		return nil
+	}
+	if _, err := io.WriteString(writer, "\nAffected services:\n"); err != nil {
+		return err
+	}
+	table := tabwriter.NewWriter(writer, 0, 2, 2, ' ', 0)
+	_, _ = fmt.Fprintln(table, "  SERVICE\tSERVICE ID\tCLASS\tRUNNING/DESIRED\tSTATE")
+	for _, service := range result.Live.AffectedServices {
+		class := service.Mode
+		if service.Singleton {
+			class = "singleton"
+		}
+		state := "unconverged"
+		counts := fmt.Sprintf("%d/%d", service.RunningTasks, service.DesiredTasks)
+		if !service.Present {
+			state = "missing"
+			counts = "-"
+		} else if service.Converged {
+			state = "converged"
+		}
+		_, _ = fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s\n", service.Name, service.ID, class, counts, state)
+	}
+	return table.Flush()
 }
 
 func runMaintenanceBegin(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
