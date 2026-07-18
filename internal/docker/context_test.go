@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	contextdocker "github.com/docker/cli/cli/context/docker"
+	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -96,6 +97,31 @@ func TestConnectorConfiguresSSHContext(t *testing.T) {
 	inspector := statusInspector.(*Inspector)
 	assert.Equal(t, "ssh://user@manager", inspector.endpoint)
 	assert.Equal(t, "http://docker.example.com", inspector.engine.DaemonHost())
+}
+
+func TestConnectorConfiguresSSHFromDockerHost(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "ssh://user@manager")
+	t.Setenv("DOCKER_CONTEXT", "ignored")
+
+	statusInspector, err := NewConnector().Connect(context.Background(), "")
+
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, statusInspector.Close()) })
+	inspector := statusInspector.(*Inspector)
+	assert.Equal(t, "ssh://user@manager", inspector.endpoint)
+	assert.Equal(t, "http://docker.example.com", inspector.engine.DaemonHost())
+}
+
+func TestConnectorExplicitDefaultContextIgnoresDockerHost(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "ssh://user@manager")
+
+	statusInspector, err := NewConnector().Connect(context.Background(), defaultContextName)
+
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, statusInspector.Close()) })
+	inspector := statusInspector.(*Inspector)
+	assert.Equal(t, client.DefaultDockerHost, inspector.endpoint)
+	assert.Equal(t, client.DefaultDockerHost, inspector.engine.DaemonHost())
 }
 
 func TestContextResolverReturnsConfigError(t *testing.T) {

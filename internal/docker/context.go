@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	dockerconfig "github.com/docker/cli/cli/config"
 	contextdocker "github.com/docker/cli/cli/context/docker"
@@ -30,7 +31,11 @@ func (c *Connector) Connect(_ context.Context, explicitContext string) (status.C
 
 	var dockerClient *client.Client
 	if resolved.endpoint == nil {
-		dockerClient, err = client.New(client.FromEnv)
+		var options []client.Opt
+		if resolved.useEnvironment {
+			options = append(options, client.FromEnv)
+		}
+		dockerClient, err = client.New(options...)
 	} else {
 		options, optionsErr := resolved.endpoint.ClientOpts()
 		if optionsErr != nil {
@@ -52,8 +57,9 @@ func (c *Connector) Connect(_ context.Context, explicitContext string) (status.C
 }
 
 type resolvedContext struct {
-	name     string
-	endpoint *contextdocker.Endpoint
+	name           string
+	endpoint       *contextdocker.Endpoint
+	useEnvironment bool
 }
 
 type contextResolver struct {
@@ -82,7 +88,15 @@ func (r contextResolver) resolve(explicit string) (resolvedContext, error) {
 		return resolvedContext{}, err
 	}
 	if name == defaultContextName {
-		return resolvedContext{name: name}, nil
+		if explicit != "" {
+			return resolvedContext{name: name}, nil
+		}
+		host := r.getenv(client.EnvOverrideHost)
+		if strings.HasPrefix(strings.ToLower(host), "ssh://") {
+			endpoint := contextdocker.Endpoint{EndpointMeta: contextdocker.EndpointMeta{Host: host}}
+			return resolvedContext{name: name, endpoint: &endpoint}, nil
+		}
+		return resolvedContext{name: name, useEnvironment: true}, nil
 	}
 	endpoint, err := r.loadEndpoint(name)
 	if err != nil {
