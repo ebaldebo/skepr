@@ -68,6 +68,11 @@ type MaintenanceConnection interface {
 	UpdateNodeAvailability(context.Context, string, string) error
 }
 
+type ReconciliationConnection interface {
+	Connection
+	ForceUpdateService(context.Context, string) error
+}
+
 type Connector interface {
 	Connect(context.Context, string) (Connection, error)
 }

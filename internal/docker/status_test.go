@@ -211,11 +211,60 @@ func TestInspectorUpdatesNodeAvailability(t *testing.T) {
 	assert.Equal(t, swarm.NodeAvailabilityDrain, engine.updateOptions.Spec.Availability)
 }
 
+func TestInspectorForceUpdatesService(t *testing.T) {
+	t.Parallel()
+
+	engine := &serviceUpdateEngine{
+		fakeEngine: fakeEngine{host: "unix:///var/run/docker.sock"},
+		service: swarm.Service{
+			ID:   "service-id",
+			Meta: swarm.Meta{Version: swarm.Version{Index: 9}},
+			Spec: swarm.ServiceSpec{
+				Annotations: swarm.Annotations{Name: "database", Labels: map[string]string{"storage": "shared"}},
+				TaskTemplate: swarm.TaskSpec{
+					ForceUpdate:   4,
+					ContainerSpec: &swarm.ContainerSpec{Image: "postgres:17"},
+				},
+				Mode: swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: uint64Pointer(1)}},
+			},
+		},
+	}
+	inspector := newInspector(engine)
+
+	err := inspector.ForceUpdateService(context.Background(), "service-id")
+
+	require.NoError(t, err)
+	assert.Equal(t, "service-id", engine.updatedServiceID)
+	assert.Equal(t, swarm.Version{Index: 9}, engine.updateOptions.Version)
+	assert.Equal(t, "database", engine.updateOptions.Spec.Name)
+	assert.Equal(t, map[string]string{"storage": "shared"}, engine.updateOptions.Spec.Labels)
+	assert.Equal(t, "postgres:17", engine.updateOptions.Spec.TaskTemplate.ContainerSpec.Image)
+	assert.Equal(t, uint64(5), engine.updateOptions.Spec.TaskTemplate.ForceUpdate)
+	assert.Equal(t, swarm.RegistryAuthFromSpec, engine.updateOptions.RegistryAuthFrom)
+}
+
 type nodeUpdateEngine struct {
 	fakeEngine
 	node          swarm.Node
 	updatedNodeID string
 	updateOptions client.NodeUpdateOptions
+}
+
+type serviceUpdateEngine struct {
+	fakeEngine
+	service          swarm.Service
+	updatedServiceID string
+	updateOptions    client.ServiceUpdateOptions
+}
+
+func (e *serviceUpdateEngine) ServiceInspect(context.Context, string, client.ServiceInspectOptions) (client.ServiceInspectResult, error) {
+	return client.ServiceInspectResult{Service: e.service}, nil
+}
+
+func (e *serviceUpdateEngine) ServiceUpdate(_ context.Context, serviceID string, options client.ServiceUpdateOptions) (client.ServiceUpdateResult, error) {
+	e.updatedServiceID = serviceID
+	e.updateOptions = options
+	return client.ServiceUpdateResult{}, nil
 }
 
 func (e *nodeUpdateEngine) NodeInspect(context.Context, string, client.NodeInspectOptions) (client.NodeInspectResult, error) {

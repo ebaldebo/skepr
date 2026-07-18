@@ -10,19 +10,37 @@ import (
 const OperationSchemaVersion = 1
 
 type Operation struct {
-	SchemaVersion    int                      `json:"schema_version"`
-	ID               string                   `json:"id"`
-	ClusterID        string                   `json:"cluster_id"`
-	Endpoint         string                   `json:"endpoint"`
-	Target           status.Node              `json:"target"`
-	Managers         []status.Node            `json:"managers"`
-	TargetWorkload   preflight.TargetWorkload `json:"target_workload"`
-	Phase            Phase                    `json:"phase"`
-	PhaseTimestamps  map[Phase]time.Time      `json:"phase_timestamps"`
-	MutationOccurred bool                     `json:"mutation_occurred"`
-	LastError        string                   `json:"last_error,omitempty"`
-	CreatedAt        time.Time                `json:"created_at"`
-	UpdatedAt        time.Time                `json:"updated_at"`
+	SchemaVersion          int                      `json:"schema_version"`
+	ID                     string                   `json:"id"`
+	ClusterID              string                   `json:"cluster_id"`
+	Endpoint               string                   `json:"endpoint"`
+	Target                 status.Node              `json:"target"`
+	Managers               []status.Node            `json:"managers"`
+	TargetWorkload         preflight.TargetWorkload `json:"target_workload"`
+	Phase                  Phase                    `json:"phase"`
+	PhaseTimestamps        map[Phase]time.Time      `json:"phase_timestamps"`
+	MutationOccurred       bool                     `json:"mutation_occurred"`
+	ReconciliationAttempts []ReconciliationAttempt  `json:"reconciliation_attempts,omitempty"`
+	LastError              string                   `json:"last_error,omitempty"`
+	CreatedAt              time.Time                `json:"created_at"`
+	UpdatedAt              time.Time                `json:"updated_at"`
+}
+
+type ReconciliationResult string
+
+const (
+	ReconciliationStarted   ReconciliationResult = "started"
+	ReconciliationConverged ReconciliationResult = "converged"
+	ReconciliationFailed    ReconciliationResult = "failed"
+)
+
+type ReconciliationAttempt struct {
+	ServiceID   string               `json:"service_id"`
+	Service     string               `json:"service"`
+	StartedAt   time.Time            `json:"started_at"`
+	CompletedAt *time.Time           `json:"completed_at,omitempty"`
+	Result      ReconciliationResult `json:"result"`
+	Error       string               `json:"error,omitempty"`
 }
 
 func (o *Operation) transition(next Phase, now time.Time) error {

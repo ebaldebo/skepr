@@ -297,10 +297,53 @@ func TestMaintenanceShowStillReportsRecordWhenDockerIsUnavailable(t *testing.T) 
 	assert.Contains(t, stdout.String(), "Live state: unavailable: manager endpoint is unreachable\n")
 }
 
+func TestMaintenanceReconcileRestartsAffectedSingleton(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	recordedAt := time.Date(2026, time.July, 18, 15, 0, 0, 0, time.UTC)
+	require.NoError(t, store.Save(operations.Record{
+		SchemaVersion:    operations.SchemaVersion,
+		ID:               "operation-1",
+		ClusterID:        "cluster-1",
+		Target:           status.Node{ID: "worker-id", Hostname: "worker-1", Role: "worker"},
+		TargetWorkload:   maintenanceWorkloadSnapshot(),
+		Phase:            maintenance.PhaseWaitingServices,
+		PhaseTimestamps:  map[maintenance.Phase]time.Time{maintenance.PhaseWaitingServices: recordedAt},
+		MutationOccurred: true,
+	}))
+	stalled := healthyMaintenanceInventory()
+	stalled.Nodes[1].Availability = "drain"
+	stalled.DesiredTasks = nil
+	stalled.Services[0].RunningTasks = 0
+	stalled.Services[0].Converged = false
+	converged := stalled
+	converged.Services = append([]status.Service(nil), stalled.Services...)
+	converged.Services[0].RunningTasks = 1
+	converged.Services[0].Converged = true
+	connection := &maintenanceConnection{inventories: []status.Result{stalled, converged}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "reconcile", "operation-1"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, "Operation: operation-1\nReconciliation attempts: 1\nPhase: maintenance-ready\n", stdout.String())
+	assert.Equal(t, []string{"service-1"}, connection.forceUpdates)
+	assert.Contains(t, stderr.String(), "operation operation-1: reconciling\n")
+	assert.Contains(t, stderr.String(), "operation operation-1: maintenance-ready\n")
+	persisted, err := store.Load("operation-1")
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseMaintenanceReady, persisted.Phase)
+	require.Len(t, persisted.ReconciliationAttempts, 1)
+	assert.Equal(t, maintenance.ReconciliationConverged, persisted.ReconciliationAttempts[0].Result)
+}
+
 type maintenanceConnection struct {
 	inventories  []status.Result
 	inspectCalls int
 	updates      []maintenanceAvailabilityUpdate
+	forceUpdates []string
 	updateErr    error
 }
 
@@ -326,6 +369,11 @@ func (c *maintenanceConnection) Inspect(context.Context) (status.Result, error) 
 
 func (c *maintenanceConnection) UpdateNodeAvailability(_ context.Context, nodeID, availability string) error {
 	c.updates = append(c.updates, maintenanceAvailabilityUpdate{nodeID: nodeID, availability: availability})
+	return c.updateErr
+}
+
+func (c *maintenanceConnection) ForceUpdateService(_ context.Context, serviceID string) error {
+	c.forceUpdates = append(c.forceUpdates, serviceID)
 	return c.updateErr
 }
 

@@ -8,11 +8,18 @@ import (
 	"encoding/json"
 	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ebaldebo/skepr/internal/cli"
 	skeprdocker "github.com/ebaldebo/skepr/internal/docker"
+	"github.com/ebaldebo/skepr/internal/maintenance"
+	"github.com/ebaldebo/skepr/internal/operations"
+	"github.com/ebaldebo/skepr/internal/preflight"
 	"github.com/ebaldebo/skepr/internal/status"
+	"github.com/moby/moby/api/types/swarm"
+	mobyclient "github.com/moby/moby/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +36,8 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	t.Setenv("DOCKER_CONTEXT", "")
 	t.Setenv("DOCKER_TLS_VERIFY", "")
 	t.Setenv("DOCKER_CERT_PATH", "")
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
 
 	connector := skeprdocker.NewConnector()
 	var statusOutput bytes.Buffer
@@ -90,4 +98,67 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Contains(t, showOutput.String(), "Phase: maintenance-ready")
 	assert.Contains(t, showOutput.String(), "Live target: ready drain")
 	assert.Contains(t, showOutput.String(), "Live target tasks: 0 desired-running")
+
+	engine, err := mobyclient.New(mobyclient.WithHost(endpoint), mobyclient.WithAPIVersionNegotiation())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = engine.Close() })
+	replicas := uint64(1)
+	created, err := engine.ServiceCreate(context.Background(), mobyclient.ServiceCreateOptions{Spec: swarm.ServiceSpec{
+		Annotations: swarm.Annotations{Name: "skepr-stalled-singleton"},
+		TaskTemplate: swarm.TaskSpec{
+			ContainerSpec: &swarm.ContainerSpec{Image: "alpine:3.20"},
+			Placement:     &swarm.Placement{Constraints: []string{"node.hostname==missing-node"}},
+		},
+		Mode: swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &replicas}},
+	}})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = engine.ServiceRemove(context.Background(), created.ID, mobyclient.ServiceRemoveOptions{})
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		inventory, err = connection.Inspect(context.Background())
+		require.NoError(t, err)
+		ready := false
+		for _, service := range inventory.Services {
+			if service.ID == created.ID && service.RunningTasks == 0 && service.DesiredTasks == 1 {
+				ready = true
+			}
+		}
+		if ready {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "stalled singleton did not reach 0/1")
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	operation, err := store.LatestActive()
+	require.NoError(t, err)
+	require.NotNil(t, operation)
+	operation.Phase = maintenance.PhaseWaitingServices
+	operation.PhaseTimestamps[maintenance.PhaseWaitingServices] = time.Now().UTC()
+	operation.TargetWorkload = preflight.TargetWorkload{AffectedServices: []preflight.AffectedService{
+		{ID: created.ID, Name: "skepr-stalled-singleton", Mode: "replicated", RunningTasks: 1, DesiredTasks: 1, Singleton: true},
+	}}
+	require.NoError(t, store.Save(*operation))
+	beforeReconcile, err := engine.ServiceInspect(context.Background(), created.ID, mobyclient.ServiceInspectOptions{})
+	require.NoError(t, err)
+
+	var reconcileOutput bytes.Buffer
+	var reconcileErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"maintenance", "reconcile", operation.ID, "--timeout", "1s"}, connector, &reconcileOutput, &reconcileErrors)
+	require.Equal(t, cli.ExitPartialMutation, exitCode, reconcileErrors.String())
+	assert.Empty(t, reconcileOutput.String())
+	assert.Contains(t, reconcileErrors.String(), "RECOVERY: node remains drained")
+
+	updated, err := engine.ServiceInspect(context.Background(), created.ID, mobyclient.ServiceInspectOptions{})
+	require.NoError(t, err)
+	assert.Greater(t, updated.Service.Version.Index, beforeReconcile.Service.Version.Index, reconcileErrors.String())
+	persisted, err := store.Load(operation.ID)
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseWaitingServices, persisted.Phase)
+	require.Len(t, persisted.ReconciliationAttempts, 1)
+	assert.Equal(t, maintenance.ReconciliationFailed, persisted.ReconciliationAttempts[0].Result)
 }

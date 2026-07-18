@@ -23,6 +23,11 @@ type nodeMutator interface {
 	NodeUpdate(context.Context, string, client.NodeUpdateOptions) (client.NodeUpdateResult, error)
 }
 
+type serviceMutator interface {
+	ServiceInspect(context.Context, string, client.ServiceInspectOptions) (client.ServiceInspectResult, error)
+	ServiceUpdate(context.Context, string, client.ServiceUpdateOptions) (client.ServiceUpdateResult, error)
+}
+
 type Inspector struct {
 	engine   engine
 	endpoint string
@@ -223,6 +228,27 @@ func (i *Inspector) UpdateNodeAvailability(ctx context.Context, nodeID, availabi
 		Spec:    spec,
 	}); err != nil {
 		return fmt.Errorf("update Swarm node %s availability at %q: %w", nodeID, i.endpoint, err)
+	}
+	return nil
+}
+
+func (i *Inspector) ForceUpdateService(ctx context.Context, serviceID string) error {
+	mutator, ok := i.engine.(serviceMutator)
+	if !ok {
+		return fmt.Errorf("docker connection at %q does not support service updates", i.endpoint)
+	}
+	inspected, err := mutator.ServiceInspect(ctx, serviceID, client.ServiceInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect Swarm service %s at %q: %w", serviceID, i.endpoint, err)
+	}
+	spec := inspected.Service.Spec
+	spec.TaskTemplate.ForceUpdate++
+	if _, err := mutator.ServiceUpdate(ctx, serviceID, client.ServiceUpdateOptions{
+		Version:          inspected.Service.Version,
+		Spec:             spec,
+		RegistryAuthFrom: swarm.RegistryAuthFromSpec,
+	}); err != nil {
+		return fmt.Errorf("force update Swarm service %s at %q: %w", serviceID, i.endpoint, err)
 	}
 	return nil
 }
