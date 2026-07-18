@@ -3,12 +3,16 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
+	"github.com/ebaldebo/skepr/internal/maintenance"
+	"github.com/ebaldebo/skepr/internal/operations"
 	"github.com/ebaldebo/skepr/internal/preflight"
 	"github.com/ebaldebo/skepr/internal/status"
 )
@@ -18,6 +22,8 @@ const (
 	ExitSafetyGate       = 1
 	ExitInvalidUsage     = 2
 	ExitDockerConnection = 3
+	ExitTimeout          = 4
+	ExitPartialMutation  = 5
 )
 
 func Run(ctx context.Context, args []string, connector status.Connector, stdout, stderr io.Writer) int {
@@ -38,10 +44,140 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 		return runStatus(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "check":
 		return runCheck(ctx, args[1:], *contextName, connector, stdout, stderr)
+	case "maintenance":
+		return runMaintenance(ctx, args[1:], *contextName, connector, stdout, stderr)
 	default:
 		report(stderr, "usage: skepr [--context name] <command>\n")
 		return ExitInvalidUsage
 	}
+}
+
+func runMaintenance(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "begin" {
+		report(stderr, "usage: skepr [--context name] maintenance begin <node> [--timeout duration] [--json]\n")
+		return ExitInvalidUsage
+	}
+	return runMaintenanceBegin(ctx, args[1:], contextName, connector, stdout, stderr)
+}
+
+func runMaintenanceBegin(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("maintenance begin", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "emit JSON output")
+	timeout := flags.Duration("timeout", 5*time.Minute, "maintenance begin timeout")
+	args = normalizeBeginArgs(args)
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 || *timeout <= 0 {
+		if err == nil {
+			report(stderr, "usage: skepr [--context name] maintenance begin <node> [--timeout duration] [--json]\n")
+		}
+		return ExitInvalidUsage
+	}
+
+	connection, err := connector.Connect(ctx, contextName)
+	if err != nil {
+		report(stderr, "configure Docker connection: %v\n", err)
+		return ExitDockerConnection
+	}
+	defer func() { _ = connection.Close() }()
+	maintenanceConnection, ok := connection.(status.MaintenanceConnection)
+	if !ok {
+		report(stderr, "Docker connection does not support Swarm node maintenance\n")
+		return ExitDockerConnection
+	}
+	stateDir, err := operations.DefaultStateDir()
+	if err != nil {
+		report(stderr, "configure operation state: %v\n", err)
+		return ExitInvalidUsage
+	}
+	store := operations.NewStore(stateDir)
+	beginner := maintenance.Beginner{
+		Client:       maintenanceConnection,
+		Store:        store,
+		Timeout:      *timeout,
+		PollInterval: time.Second,
+		Progress: func(operation maintenance.Operation) {
+			_, _ = fmt.Fprintf(stderr, "operation %s: %s\n", operation.ID, operation.Phase)
+		},
+	}
+	operation, err := beginner.Begin(ctx, flags.Arg(0))
+	if err != nil {
+		return reportMaintenanceBeginError(err, stdout, stderr)
+	}
+	result := struct {
+		SchemaVersion int                   `json:"schema_version"`
+		Operation     maintenance.Operation `json:"operation"`
+	}{SchemaVersion: maintenance.OperationSchemaVersion, Operation: operation}
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			report(stderr, "write maintenance begin output: %v\n", err)
+			return ExitDockerConnection
+		}
+		return ExitSuccess
+	}
+	_, err = fmt.Fprintf(stdout, "Operation: %s\nTarget: %s (%s)\nPhase: %s\n", operation.ID, operation.Target.Hostname, operation.Target.ID, operation.Phase)
+	if err != nil {
+		report(stderr, "write maintenance begin output: %v\n", err)
+		return ExitDockerConnection
+	}
+	return ExitSuccess
+}
+
+func normalizeBeginArgs(args []string) []string {
+	var flagArgs []string
+	var positional []string
+	for index := 0; index < len(args); index++ {
+		switch args[index] {
+		case "--json":
+			flagArgs = append(flagArgs, args[index])
+		case "--timeout":
+			flagArgs = append(flagArgs, args[index])
+			if index+1 < len(args) {
+				index++
+				flagArgs = append(flagArgs, args[index])
+			}
+		default:
+			if strings.HasPrefix(args[index], "--timeout=") {
+				flagArgs = append(flagArgs, args[index])
+			} else {
+				positional = append(positional, args[index])
+			}
+		}
+	}
+	return append(flagArgs, positional...)
+}
+
+func reportMaintenanceBeginError(err error, stdout, stderr io.Writer) int {
+	var safety *maintenance.SafetyError
+	if errors.As(err, &safety) {
+		for _, finding := range safety.Result.Findings {
+			if finding.Level == preflight.LevelBlocker {
+				_, _ = fmt.Fprintf(stdout, "BLOCKER: %s\n", finding.Message)
+			}
+		}
+		return ExitSafetyGate
+	}
+	var active *operations.ActiveOperationError
+	if errors.As(err, &active) {
+		report(stderr, "%v\n", active)
+		return ExitSafetyGate
+	}
+	var beginError *maintenance.BeginError
+	if errors.As(err, &beginError) {
+		report(stderr, "%v\n", beginError)
+		if beginError.MutationOccurred {
+			report(stderr, "RECOVERY: node remains drained; inspect operation %s before further mutation\n", beginError.OperationID)
+			return ExitPartialMutation
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		report(stderr, "maintenance begin stopped: %v\n", err)
+		return ExitTimeout
+	}
+	report(stderr, "maintenance begin: %v\n", err)
+	return ExitDockerConnection
 }
 
 func runStatus(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {

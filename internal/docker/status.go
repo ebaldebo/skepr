@@ -18,6 +18,11 @@ type engine interface {
 	DaemonHost() string
 }
 
+type nodeMutator interface {
+	NodeInspect(context.Context, string, client.NodeInspectOptions) (client.NodeInspectResult, error)
+	NodeUpdate(context.Context, string, client.NodeUpdateOptions) (client.NodeUpdateResult, error)
+}
+
 type Inspector struct {
 	engine   engine
 	endpoint string
@@ -189,6 +194,37 @@ func unhealthyTaskState(state swarm.TaskState) bool {
 	default:
 		return false
 	}
+}
+
+func (i *Inspector) UpdateNodeAvailability(ctx context.Context, nodeID, availability string) error {
+	mutator, ok := i.engine.(nodeMutator)
+	if !ok {
+		return fmt.Errorf("docker connection at %q does not support node updates", i.endpoint)
+	}
+	var desired swarm.NodeAvailability
+	switch availability {
+	case "active":
+		desired = swarm.NodeAvailabilityActive
+	case "pause":
+		desired = swarm.NodeAvailabilityPause
+	case "drain":
+		desired = swarm.NodeAvailabilityDrain
+	default:
+		return fmt.Errorf("unsupported node availability %q", availability)
+	}
+	inspected, err := mutator.NodeInspect(ctx, nodeID, client.NodeInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect Swarm node %s at %q: %w", nodeID, i.endpoint, err)
+	}
+	spec := inspected.Node.Spec
+	spec.Availability = desired
+	if _, err := mutator.NodeUpdate(ctx, nodeID, client.NodeUpdateOptions{
+		Version: inspected.Node.Version,
+		Spec:    spec,
+	}); err != nil {
+		return fmt.Errorf("update Swarm node %s availability at %q: %w", nodeID, i.endpoint, err)
+	}
+	return nil
 }
 
 func (i *Inspector) Close() error {

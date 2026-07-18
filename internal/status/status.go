@@ -63,6 +63,11 @@ type Connection interface {
 	io.Closer
 }
 
+type MaintenanceConnection interface {
+	Connection
+	UpdateNodeAvailability(context.Context, string, string) error
+}
+
 type Connector interface {
 	Connect(context.Context, string) (Connection, error)
 }

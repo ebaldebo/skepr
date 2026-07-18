@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ebaldebo/skepr/internal/maintenance"
 	"golang.org/x/sys/unix"
 )
 
@@ -23,7 +24,7 @@ type ClusterLock struct {
 	released bool
 }
 
-func (s *Store) AcquireClusterLock(clusterID string) (*ClusterLock, error) {
+func (s *Store) AcquireClusterLock(clusterID string) (maintenance.ClusterLock, error) {
 	if clusterID == "" {
 		return nil, fmt.Errorf("cluster ID is required")
 	}

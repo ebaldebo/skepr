@@ -184,6 +184,50 @@ func TestInspectorNormalizesDesiredRunningTasks(t *testing.T) {
 	}, result.DesiredTasks)
 }
 
+func TestInspectorUpdatesNodeAvailability(t *testing.T) {
+	t.Parallel()
+
+	engine := &nodeUpdateEngine{
+		fakeEngine: fakeEngine{host: "unix:///var/run/docker.sock"},
+		node: swarm.Node{
+			ID:   "worker-id",
+			Meta: swarm.Meta{Version: swarm.Version{Index: 7}},
+			Spec: swarm.NodeSpec{
+				Annotations:  swarm.Annotations{Labels: map[string]string{"storage": "shared"}},
+				Role:         swarm.NodeRoleWorker,
+				Availability: swarm.NodeAvailabilityActive,
+			},
+		},
+	}
+	inspector := newInspector(engine)
+
+	err := inspector.UpdateNodeAvailability(context.Background(), "worker-id", "drain")
+
+	require.NoError(t, err)
+	assert.Equal(t, "worker-id", engine.updatedNodeID)
+	assert.Equal(t, swarm.Version{Index: 7}, engine.updateOptions.Version)
+	assert.Equal(t, swarm.NodeRoleWorker, engine.updateOptions.Spec.Role)
+	assert.Equal(t, map[string]string{"storage": "shared"}, engine.updateOptions.Spec.Labels)
+	assert.Equal(t, swarm.NodeAvailabilityDrain, engine.updateOptions.Spec.Availability)
+}
+
+type nodeUpdateEngine struct {
+	fakeEngine
+	node          swarm.Node
+	updatedNodeID string
+	updateOptions client.NodeUpdateOptions
+}
+
+func (e *nodeUpdateEngine) NodeInspect(context.Context, string, client.NodeInspectOptions) (client.NodeInspectResult, error) {
+	return client.NodeInspectResult{Node: e.node}, nil
+}
+
+func (e *nodeUpdateEngine) NodeUpdate(_ context.Context, nodeID string, options client.NodeUpdateOptions) (client.NodeUpdateResult, error) {
+	e.updatedNodeID = nodeID
+	e.updateOptions = options
+	return client.NodeUpdateResult{}, nil
+}
+
 type fakeEngine struct {
 	host     string
 	info     system.Info

@@ -29,6 +29,7 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	t.Setenv("DOCKER_CONTEXT", "")
 	t.Setenv("DOCKER_TLS_VERIFY", "")
 	t.Setenv("DOCKER_CERT_PATH", "")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	connector := skeprdocker.NewConnector()
 	var statusOutput bytes.Buffer
@@ -61,4 +62,24 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Contains(t, checkOutput.String(), "PASS: Swarm manager manager-3 is healthy")
 	assert.Contains(t, checkOutput.String(), "SAFE: target node worker-1 passed checks")
 	assert.Contains(t, checkOutput.String(), "Target workloads: 0 desired-running tasks across 0 affected services")
+
+	var beginOutput bytes.Buffer
+	var beginErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"maintenance", "begin", "worker-1", "--timeout", "30s"}, connector, &beginOutput, &beginErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, beginErrors.String())
+	assert.Contains(t, beginOutput.String(), "Target: worker-1 (")
+	assert.Contains(t, beginOutput.String(), "Phase: maintenance-ready")
+
+	connection, err := connector.Connect(context.Background(), "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = connection.Close() })
+	inventory, err = connection.Inspect(context.Background())
+	require.NoError(t, err)
+	workerAvailability := ""
+	for _, node := range inventory.Nodes {
+		if node.Hostname == "worker-1" {
+			workerAvailability = node.Availability
+		}
+	}
+	assert.Equal(t, "drain", workerAvailability)
 }

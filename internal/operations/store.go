@@ -5,30 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/ebaldebo/skepr/internal/maintenance"
-	"github.com/ebaldebo/skepr/internal/preflight"
-	"github.com/ebaldebo/skepr/internal/status"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = maintenance.OperationSchemaVersion
 
-type Record struct {
-	SchemaVersion    int                             `json:"schema_version"`
-	ID               string                          `json:"id"`
-	ClusterID        string                          `json:"cluster_id"`
-	Endpoint         string                          `json:"endpoint"`
-	Target           status.Node                     `json:"target"`
-	Managers         []status.Node                   `json:"managers"`
-	TargetWorkload   preflight.TargetWorkload        `json:"target_workload"`
-	Phase            maintenance.Phase               `json:"phase"`
-	PhaseTimestamps  map[maintenance.Phase]time.Time `json:"phase_timestamps"`
-	MutationOccurred bool                            `json:"mutation_occurred"`
-	LastError        string                          `json:"last_error,omitempty"`
-	CreatedAt        time.Time                       `json:"created_at"`
-	UpdatedAt        time.Time                       `json:"updated_at"`
-}
+type Record = maintenance.Operation
 
 type Store struct {
 	operationsDir string
@@ -40,6 +23,17 @@ func NewStore(stateDir string) *Store {
 		operationsDir: filepath.Join(stateDir, "operations"),
 		locksDir:      filepath.Join(stateDir, "locks"),
 	}
+}
+
+func DefaultStateDir() (string, error) {
+	if stateHome := os.Getenv("XDG_STATE_HOME"); stateHome != "" {
+		return filepath.Join(stateHome, "skepr"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory for Skepr state: %w", err)
+	}
+	return filepath.Join(home, ".local", "state", "skepr"), nil
 }
 
 func (s *Store) Save(record Record) error {
