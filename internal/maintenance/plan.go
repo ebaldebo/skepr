@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/BurntSushi/toml"
@@ -12,7 +13,8 @@ type Plan struct {
 		Hostname string `toml:"hostname"`
 	} `toml:"target"`
 	Swarm struct {
-		Contexts []string `toml:"contexts"`
+		Contexts  []string `toml:"contexts"`
+		Endpoints []string `toml:"endpoints"`
 	} `toml:"swarm"`
 	Commands RunCommands `toml:"commands"`
 }
@@ -55,6 +57,15 @@ func (p Plan) Validate() error {
 	for _, contextName := range p.Swarm.Contexts {
 		if contextName == "" {
 			return fmt.Errorf("maintenance plan swarm.contexts contains an empty context name")
+		}
+	}
+	for _, endpoint := range p.Swarm.Endpoints {
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Scheme != "ssh" || parsed.Host == "" {
+			return fmt.Errorf("maintenance plan swarm.endpoints contains an unsupported endpoint; expected ssh:// endpoint")
+		}
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			return fmt.Errorf("maintenance plan swarm.endpoints must not contain passwords")
 		}
 	}
 	return nil

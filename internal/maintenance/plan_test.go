@@ -16,6 +16,7 @@ hostname = "manager-2"
 
 [swarm]
 contexts = ["manager-1", "manager-3"]
+endpoints = ["ssh://root@10.0.0.2", "ssh://root@10.0.0.3"]
 
 [commands]
 pre = ["ssh", "manager-2", "hostname"]
@@ -28,6 +29,7 @@ verify = ["ssh", "manager-2", "docker", "info"]
 	require.NoError(t, err)
 	assert.Equal(t, "manager-2", plan.Target.Hostname)
 	assert.Equal(t, []string{"manager-1", "manager-3"}, plan.Swarm.Contexts)
+	assert.Equal(t, []string{"ssh://root@10.0.0.2", "ssh://root@10.0.0.3"}, plan.Swarm.Endpoints)
 	assert.Equal(t, []string{"ssh", "manager-2", "hostname"}, plan.Commands.Pre)
 	assert.Equal(t, []string{"nixos-rebuild", "switch", "--flake", ".#manager-2"}, plan.Commands.Update)
 	assert.Equal(t, []string{"ssh", "manager-2", "docker", "info"}, plan.Commands.Verify)

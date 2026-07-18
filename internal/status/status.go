@@ -29,6 +29,7 @@ type Service struct {
 	RunningTasks uint64 `json:"running_tasks"`
 	DesiredTasks uint64 `json:"desired_tasks"`
 	Converged    bool   `json:"converged"`
+	ForceUpdate  uint64 `json:"-"`
 }
 
 type Task struct {
@@ -75,4 +76,8 @@ type ReconciliationConnection interface {
 
 type Connector interface {
 	Connect(context.Context, string) (Connection, error)
+}
+
+type EndpointConnector interface {
+	ConnectEndpoint(context.Context, string) (Connection, error)
 }

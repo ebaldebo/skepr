@@ -139,3 +139,11 @@ func TestContextResolverReturnsConfigError(t *testing.T) {
 
 	require.ErrorIs(t, err, want)
 }
+
+func TestConnectorRejectsUnsupportedRawEndpoint(t *testing.T) {
+	connector := NewConnector()
+
+	_, err := connector.ConnectEndpoint(context.Background(), "tcp://manager-1:2376")
+
+	assert.EqualError(t, err, `unsupported raw Docker endpoint: expected ssh:// endpoint`)
+}

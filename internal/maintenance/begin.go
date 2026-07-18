@@ -22,15 +22,16 @@ type BeginClient interface {
 }
 
 type Beginner struct {
-	Client         BeginClient
-	Store          OperationStore
-	Now            func() time.Time
-	NewOperationID func() (string, error)
-	Progress       func(Operation)
-	Timeout        time.Duration
-	PollInterval   time.Duration
-	BeforeDrain    func(context.Context, *Operation) error
-	Initialize     func(*Operation)
+	Client            BeginClient
+	Store             OperationStore
+	Now               func() time.Time
+	NewOperationID    func() (string, error)
+	Progress          func(Operation)
+	Timeout           time.Duration
+	PollInterval      time.Duration
+	BeforeDrain       func(context.Context, *Operation) error
+	Initialize        func(*Operation)
+	ExpectedClusterID string
 }
 
 type BeginResumeStore interface {
@@ -65,6 +66,9 @@ func (b Beginner) Begin(ctx context.Context, requestedNode string) (Operation, e
 	initialInventory, err := b.Client.Inspect(ctx)
 	if err != nil {
 		return Operation{}, fmt.Errorf("inspect Swarm before maintenance: %w", err)
+	}
+	if b.ExpectedClusterID != "" && initialInventory.Cluster.ID != b.ExpectedClusterID {
+		return Operation{}, fmt.Errorf("connected Swarm %s does not match transaction cluster %s", initialInventory.Cluster.ID, b.ExpectedClusterID)
 	}
 	initialCheck := preflight.CheckNode(initialInventory, requestedNode)
 	if !initialCheck.Safe {

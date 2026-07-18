@@ -15,6 +15,8 @@ type LockConflictError struct {
 	ClusterID string
 }
 
+func (e *LockConflictError) OperationAlreadyRunning() bool { return true }
+
 func (e *LockConflictError) Error() string {
 	return fmt.Sprintf("maintenance operation already active for cluster %s", e.ClusterID)
 }

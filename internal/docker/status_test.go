@@ -65,8 +65,9 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 			{
 				ID: "s2",
 				Spec: swarm.ServiceSpec{
-					Annotations: swarm.Annotations{Name: "database"},
-					Mode:        swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: uint64Pointer(1)}},
+					Annotations:  swarm.Annotations{Name: "database"},
+					Mode:         swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: uint64Pointer(1)}},
+					TaskTemplate: swarm.TaskSpec{ForceUpdate: 7},
 				},
 				ServiceStatus: &swarm.ServiceStatus{RunningTasks: 0, DesiredTasks: 1},
 			},
@@ -99,7 +100,7 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
 		},
 		Services: []status.Service{
-			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false},
+			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false, ForceUpdate: 7},
 			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 3, DesiredTasks: 3, Converged: true},
 			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
 		},

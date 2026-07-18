@@ -43,15 +43,21 @@ const (
 	RunPhaseWaitingVerify   RunPhase = "waiting-verify"
 	RunPhaseVerifyCompleted RunPhase = "verify-completed"
 	RunPhaseCompleted       RunPhase = "completed"
+	RunPhaseAborted         RunPhase = "aborted"
 )
 
 type RunState struct {
 	Phase           RunPhase               `json:"phase"`
 	TargetHostname  string                 `json:"target_hostname"`
 	DockerContexts  []string               `json:"docker_contexts"`
+	DockerEndpoints []string               `json:"docker_endpoints,omitempty"`
 	Commands        RunCommands            `json:"commands"`
 	CommandAttempts []CommandAttempt       `json:"command_attempts,omitempty"`
 	PhaseTimestamps map[RunPhase]time.Time `json:"phase_timestamps"`
+}
+
+func (o Operation) Terminal() bool {
+	return o.Phase == PhaseCompleted || o.Phase == PhaseAborted
 }
 
 type RunCommands struct {

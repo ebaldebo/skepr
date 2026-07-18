@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/ebaldebo/skepr/internal/preflight"
 	"github.com/ebaldebo/skepr/internal/status"
 )
 
@@ -15,6 +16,10 @@ type RunClient interface {
 	Inspect(context.Context) (status.Result, error)
 	UpdateNodeAvailability(context.Context, string, string) error
 	ForceUpdateService(context.Context, string) error
+}
+
+type ClusterPinnedClient interface {
+	PinCluster(string)
 }
 
 type RunStore interface {
@@ -45,6 +50,42 @@ type TransactionRunner struct {
 	ReturnTimeout time.Duration
 	PollInterval  time.Duration
 	Now           func() time.Time
+	lockHeld      bool
+}
+
+type OperationAlreadyRunningError struct {
+	OperationID string
+	ClusterID   string
+}
+
+type CommandResolution string
+
+const (
+	CommandResolutionRetry  CommandResolution = "retry"
+	CommandResolutionAccept CommandResolution = "accept"
+)
+
+type AmbiguousCommandError struct {
+	OperationID string
+	Hook        string
+}
+
+type AbortSafetyError struct {
+	Err error
+}
+
+func (e *AbortSafetyError) Error() string { return e.Err.Error() }
+func (e *AbortSafetyError) Unwrap() error { return e.Err }
+
+func (e *AmbiguousCommandError) Error() string {
+	return fmt.Sprintf("operation %s has an ambiguous %s command result", e.OperationID, e.Hook)
+}
+
+func (e *OperationAlreadyRunningError) Error() string {
+	if e.OperationID != "" {
+		return fmt.Sprintf("operation already running: %s", e.OperationID)
+	}
+	return fmt.Sprintf("operation already running for cluster %s", e.ClusterID)
 }
 
 type TransactionError struct {
@@ -63,17 +104,37 @@ func (e *TransactionError) Error() string {
 
 func (e *TransactionError) Unwrap() error { return e.Err }
 
-func (r TransactionRunner) Run(ctx context.Context, target string, commands RunCommands, dockerContexts []string) (Operation, error) {
+func (r TransactionRunner) Run(ctx context.Context, target string, commands RunCommands, dockerContexts, dockerEndpoints []string) (Operation, error) {
+	inventory, err := r.Client.Inspect(ctx)
+	if err != nil {
+		return Operation{}, fmt.Errorf("inspect Swarm before acquiring transaction lock: %w", err)
+	}
+	initialCheck := preflight.CheckNode(inventory, target)
+	if !initialCheck.Safe {
+		return Operation{}, &SafetyError{Result: initialCheck}
+	}
+	if client, ok := r.Client.(ClusterPinnedClient); ok {
+		client.PinCluster(inventory.Cluster.ID)
+	}
+	lock, err := r.Store.AcquireClusterLock(inventory.Cluster.ID)
+	if err != nil {
+		return Operation{}, r.runningError("", inventory.Cluster.ID, err)
+	}
+	defer func() { _ = lock.Release() }()
+	r.lockHeld = true
+	componentStore := r.componentStore()
 	beginner := Beginner{
-		Client:       r.Client,
-		Store:        r.Store,
-		Timeout:      r.timeout(),
-		PollInterval: r.pollInterval(),
-		Progress:     r.Progress,
+		Client:            r.Client,
+		Store:             componentStore,
+		Timeout:           r.timeout(),
+		PollInterval:      r.pollInterval(),
+		Progress:          r.Progress,
+		ExpectedClusterID: inventory.Cluster.ID,
 		Initialize: func(operation *Operation) {
 			operation.Run = &RunState{
 				TargetHostname:  target,
 				DockerContexts:  append([]string(nil), dockerContexts...),
+				DockerEndpoints: append([]string(nil), dockerEndpoints...),
 				Commands:        commands,
 				PhaseTimestamps: make(map[RunPhase]time.Time),
 			}
@@ -98,7 +159,7 @@ func (r TransactionRunner) Run(ctx context.Context, target string, commands RunC
 	return r.continueRun(ctx, operation)
 }
 
-func (r TransactionRunner) Resume(ctx context.Context, operationID string) (Operation, error) {
+func (r TransactionRunner) Resume(ctx context.Context, operationID string, resolution CommandResolution) (Operation, error) {
 	operation, err := r.Store.Load(operationID)
 	if err != nil {
 		return Operation{}, fmt.Errorf("load maintenance run operation %s: %w", operationID, err)
@@ -106,7 +167,88 @@ func (r TransactionRunner) Resume(ctx context.Context, operationID string) (Oper
 	if operation.Run == nil {
 		return operation, &TransactionError{OperationID: operation.ID, Drained: operation.MutationOccurred, Err: fmt.Errorf("operation was not created by maintenance run")}
 	}
+	if client, ok := r.Client.(ClusterPinnedClient); ok {
+		client.PinCluster(operation.ClusterID)
+	}
+	lock, err := r.Store.AcquireClusterLock(operation.ClusterID)
+	if err != nil {
+		return operation, r.runningError(operation.ID, operation.ClusterID, err)
+	}
+	defer func() { _ = lock.Release() }()
+	r.lockHeld = true
+	operation, err = r.Store.Load(operationID)
+	if err != nil {
+		return Operation{}, fmt.Errorf("reload maintenance run operation %s: %w", operationID, err)
+	}
+	if err := r.resolveCommand(&operation, resolution); err != nil {
+		return operation, err
+	}
 	return r.continueRun(ctx, operation)
+}
+
+func (r TransactionRunner) Abort(operationID string) (Operation, error) {
+	operation, err := r.Store.Load(operationID)
+	if err != nil {
+		return Operation{}, fmt.Errorf("load maintenance run operation %s: %w", operationID, err)
+	}
+	lock, err := r.Store.AcquireClusterLock(operation.ClusterID)
+	if err != nil {
+		return operation, r.runningError(operation.ID, operation.ClusterID, err)
+	}
+	defer func() { _ = lock.Release() }()
+	operation, err = r.Store.Load(operationID)
+	if err != nil {
+		return Operation{}, fmt.Errorf("reload maintenance run operation %s: %w", operationID, err)
+	}
+	if operation.Run == nil {
+		return operation, &AbortSafetyError{Err: fmt.Errorf("operation %s was not created by maintenance run", operation.ID)}
+	}
+	if operation.MutationOccurred || operation.Phase != PhaseCreated && operation.Phase != PhasePreflightPassed {
+		return operation, &AbortSafetyError{Err: fmt.Errorf("operation %s cannot be aborted safely from phase %s", operation.ID, operation.Phase)}
+	}
+	now := r.now()
+	if err := operation.transition(PhaseAborted, now); err != nil {
+		return operation, err
+	}
+	operation.Run.Phase = RunPhaseAborted
+	if operation.Run.PhaseTimestamps == nil {
+		operation.Run.PhaseTimestamps = make(map[RunPhase]time.Time)
+	}
+	operation.Run.PhaseTimestamps[RunPhaseAborted] = now
+	if err := r.Store.Save(operation); err != nil {
+		return operation, fmt.Errorf("persist aborted maintenance run %s: %w", operation.ID, err)
+	}
+	return operation, nil
+}
+
+func (r TransactionRunner) resolveCommand(operation *Operation, resolution CommandResolution) error {
+	var hook string
+	var retriedPhase RunPhase
+	var acceptedPhase RunPhase
+	switch operation.Run.Phase {
+	case RunPhasePreRunning:
+		hook, retriedPhase, acceptedPhase = "pre", RunPhasePreFailed, RunPhasePreCompleted
+	case RunPhaseUpdateRunning, RunPhaseUpdateFailed:
+		hook, retriedPhase, acceptedPhase = "update", RunPhaseUpdateFailed, RunPhaseUpdateCompleted
+	case RunPhaseVerifyRunning:
+		hook, retriedPhase, acceptedPhase = "verify", RunPhaseVerifyFailed, RunPhaseVerifyCompleted
+	default:
+		if resolution != "" {
+			return fmt.Errorf("operation %s has no ambiguous command to resolve", operation.ID)
+		}
+		return nil
+	}
+	if resolution == "" {
+		return &AmbiguousCommandError{OperationID: operation.ID, Hook: hook}
+	}
+	switch resolution {
+	case CommandResolutionRetry:
+		return r.setRunPhase(operation, retriedPhase)
+	case CommandResolutionAccept:
+		return r.setRunPhase(operation, acceptedPhase)
+	default:
+		return fmt.Errorf("unsupported command resolution %q", resolution)
+	}
 }
 
 func (r TransactionRunner) continueRun(ctx context.Context, operation Operation) (Operation, error) {
@@ -122,7 +264,7 @@ func (r TransactionRunner) continueRun(ctx context.Context, operation Operation)
 			return r.executeHook(ctx, operation, "pre", operation.Run.Commands.Pre, RunPhasePreRunning, RunPhasePreCompleted, RunPhasePreFailed)
 		}
 		operation, err = (Beginner{
-			Client: r.Client, Store: r.Store, Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress, BeforeDrain: beforeDrain,
+			Client: r.Client, Store: r.componentStore(), Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress, BeforeDrain: beforeDrain,
 		}).Resume(ctx, operation.ID)
 		if err != nil && operation.Phase != PhaseWaitingServices {
 			return operation, r.transactionError(operation, err)
@@ -130,7 +272,7 @@ func (r TransactionRunner) continueRun(ctx context.Context, operation Operation)
 	}
 	if operation.Phase == PhaseWaitingServices {
 		operation, err = (Reconciler{
-			Client: r.Client, Store: r.Store, Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress,
+			Client: r.Client, Store: r.componentStore(), Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress,
 		}).Reconcile(ctx, operation.ID)
 		if err != nil {
 			return operation, r.transactionError(operation, err)
@@ -146,7 +288,7 @@ func (r TransactionRunner) continueRun(ctx context.Context, operation Operation)
 	}
 	if operation.Phase == PhaseVerifyingReturn || operation.Phase == PhaseActivating || operation.Phase == PhaseVerifyingCluster {
 		operation, err = (Finisher{
-			Client: r.Client, Store: r.Store, Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress,
+			Client: r.Client, Store: r.componentStore(), Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress,
 		}).Finish(ctx, operation.ID)
 		if err != nil {
 			return operation, r.transactionError(operation, err)
@@ -191,7 +333,7 @@ func (r TransactionRunner) continueRun(ctx context.Context, operation Operation)
 		fallthrough
 	case RunPhaseVerifyCompleted:
 		operation, err = (Finisher{
-			Client: r.Client, Store: r.Store, Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress,
+			Client: r.Client, Store: r.componentStore(), Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress,
 		}).Finish(ctx, operation.ID)
 		if err != nil {
 			return operation, r.transactionError(operation, err)
@@ -205,6 +347,36 @@ func (r TransactionRunner) continueRun(ctx context.Context, operation Operation)
 		return operation, r.transactionError(operation, fmt.Errorf("maintenance run has unsupported phase %s", operation.Run.Phase))
 	}
 	return operation, nil
+}
+
+type transactionLockedStore struct {
+	RunStore
+}
+
+func (s transactionLockedStore) AcquireClusterLock(string) (ClusterLock, error) {
+	return transactionNoopLock{}, nil
+}
+
+type transactionNoopLock struct{}
+
+func (transactionNoopLock) Release() error { return nil }
+
+func (r TransactionRunner) componentStore() RunStore {
+	if r.lockHeld {
+		return transactionLockedStore{RunStore: r.Store}
+	}
+	return r.Store
+}
+
+func (r TransactionRunner) runningError(operationID, clusterID string, err error) error {
+	type alreadyRunning interface {
+		OperationAlreadyRunning() bool
+	}
+	var conflict alreadyRunning
+	if errors.As(err, &conflict) && conflict.OperationAlreadyRunning() {
+		return &OperationAlreadyRunningError{OperationID: operationID, ClusterID: clusterID}
+	}
+	return err
 }
 
 func (r TransactionRunner) executeHook(ctx context.Context, operation *Operation, hook string, argv []string, running, completed, failed RunPhase) error {
@@ -314,6 +486,9 @@ func (r TransactionRunner) setRunPhase(operation *Operation, phase RunPhase) err
 
 func (r TransactionRunner) transactionError(operation Operation, err error) error {
 	activationStarted := operation.Phase == PhaseActivating || operation.Phase == PhaseVerifyingCluster
+	if operation.Run != nil && operation.Run.Phase == RunPhaseUpdateFailed {
+		err = errors.Join(err, &AmbiguousCommandError{OperationID: operation.ID, Hook: "update"})
+	}
 	return &TransactionError{
 		OperationID:       operation.ID,
 		Drained:           operation.MutationOccurred && operation.Phase != PhaseCompleted && !activationStarted,

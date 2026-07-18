@@ -327,8 +327,13 @@ func writeMaintenanceShow(writer io.Writer, result maintenance.ShowResult) error
 		}
 	}
 	if result.Operation.Run != nil {
-		if _, err := fmt.Fprintf(writer, "Run phase: %s\nResume: skepr maintenance run --resume %s\n", result.Operation.Run.Phase, result.Operation.ID); err != nil {
+		if _, err := fmt.Fprintf(writer, "Run phase: %s\n", result.Operation.Run.Phase); err != nil {
 			return err
+		}
+		if !result.Operation.Terminal() {
+			if _, err := fmt.Fprintf(writer, "Resume: skepr maintenance run --resume %s\n", result.Operation.ID); err != nil {
+				return err
+			}
 		}
 	}
 	if result.LiveError != "" {

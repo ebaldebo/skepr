@@ -123,6 +123,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			RunningTasks: service.ServiceStatus.RunningTasks,
 			DesiredTasks: service.ServiceStatus.DesiredTasks,
 			Converged:    service.ServiceStatus.RunningTasks == service.ServiceStatus.DesiredTasks,
+			ForceUpdate:  service.Spec.TaskTemplate.ForceUpdate,
 		})
 	}
 	sort.Slice(result.Services, func(a, b int) bool {

@@ -16,14 +16,17 @@ const (
 	PhaseActivating       Phase = "activating"
 	PhaseVerifyingCluster Phase = "verifying-cluster"
 	PhaseCompleted        Phase = "completed"
+	PhaseAborted          Phase = "aborted"
 )
 
 var allowedTransitions = map[Phase]map[Phase]struct{}{
 	PhaseCreated: {
 		PhasePreflightPassed: {},
+		PhaseAborted:         {},
 	},
 	PhasePreflightPassed: {
 		PhaseDraining: {},
+		PhaseAborted:  {},
 	},
 	PhaseDraining: {
 		PhaseEvacuating: {},
@@ -51,6 +54,7 @@ var allowedTransitions = map[Phase]map[Phase]struct{}{
 		PhaseCompleted: {},
 	},
 	PhaseCompleted: {},
+	PhaseAborted:   {},
 }
 
 func ValidateTransition(current, next Phase) error {

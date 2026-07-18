@@ -20,16 +20,18 @@ type maintenanceRunOptions struct {
 	target        string
 	planPath      string
 	resumeID      string
+	abortID       string
 	updateCommand []string
 	timeout       time.Duration
 	returnTimeout time.Duration
 	jsonOutput    bool
+	resolution    maintenance.CommandResolution
 }
 
 func runMaintenanceTransaction(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
 	options, err := parseMaintenanceRunArgs(args)
 	if err != nil {
-		report(stderr, "%v\nusage: skepr [--context name] maintenance run <node> (--plan path | -- <update-command> [args...]) [--timeout duration] [--return-timeout duration] [--json]\n", err)
+		report(stderr, "%v\nusage:\n  skepr [--context name] maintenance run <node> (--plan path | -- <update-command> [args...]) [--timeout duration] [--return-timeout duration] [--json]\n  skepr maintenance run --resume <operation-id> [--retry-command | --accept-command]\n  skepr maintenance run --abort <operation-id>\n", err)
 		return ExitInvalidUsage
 	}
 	stateDir, err := operations.DefaultStateDir()
@@ -38,9 +40,17 @@ func runMaintenanceTransaction(ctx context.Context, args []string, contextName s
 		return ExitInvalidUsage
 	}
 	store := operations.NewStore(stateDir)
+	if options.abortID != "" {
+		operation, abortErr := (maintenance.TransactionRunner{Store: store}).Abort(options.abortID)
+		if abortErr != nil {
+			return reportMaintenanceRunError(abortErr, stdout, stderr)
+		}
+		return writeMaintenanceRunResult(operation, options.jsonOutput, stdout, stderr)
+	}
 
 	var commands maintenance.RunCommands
 	var contexts []string
+	var endpoints []string
 	if options.resumeID != "" {
 		operation, loadErr := store.Load(options.resumeID)
 		if loadErr != nil {
@@ -52,6 +62,7 @@ func runMaintenanceTransaction(ctx context.Context, args []string, contextName s
 			return ExitInvalidUsage
 		}
 		contexts = append(contexts, operation.Run.DockerContexts...)
+		endpoints = append(endpoints, operation.Run.DockerEndpoints...)
 	} else if options.planPath != "" {
 		plan, loadErr := maintenance.LoadPlan(options.planPath)
 		if loadErr != nil {
@@ -64,6 +75,7 @@ func runMaintenanceTransaction(ctx context.Context, args []string, contextName s
 		}
 		commands = plan.Commands
 		contexts = append(contexts, plan.Swarm.Contexts...)
+		endpoints = append(endpoints, plan.Swarm.Endpoints...)
 	} else {
 		commands = maintenance.RunCommands{Update: append([]string(nil), options.updateCommand...)}
 	}
@@ -71,11 +83,12 @@ func runMaintenanceTransaction(ctx context.Context, args []string, contextName s
 		contexts = append([]string{contextName}, contexts...)
 	}
 	contexts = uniqueContexts(contexts)
-	if len(contexts) == 0 {
+	endpoints = uniqueContexts(endpoints)
+	if len(contexts) == 0 && len(endpoints) == 0 {
 		contexts = []string{""}
 	}
 
-	pool := maintenance.NewEndpointPool(connector, contexts)
+	pool := maintenance.NewEndpointPoolWithEndpoints(connector, contexts, endpoints)
 	defer func() { _ = pool.Close() }()
 	runner := maintenance.TransactionRunner{
 		Client:        pool,
@@ -94,18 +107,22 @@ func runMaintenanceTransaction(ctx context.Context, args []string, contextName s
 	}
 	var operation maintenance.Operation
 	if options.resumeID != "" {
-		operation, err = runner.Resume(ctx, options.resumeID)
+		operation, err = runner.Resume(ctx, options.resumeID, options.resolution)
 	} else {
-		operation, err = runner.Run(ctx, options.target, commands, contexts)
+		operation, err = runner.Run(ctx, options.target, commands, contexts, endpoints)
 	}
 	if err != nil {
 		return reportMaintenanceRunError(err, stdout, stderr)
 	}
+	return writeMaintenanceRunResult(operation, options.jsonOutput, stdout, stderr)
+}
+
+func writeMaintenanceRunResult(operation maintenance.Operation, jsonOutput bool, stdout, stderr io.Writer) int {
 	result := struct {
 		SchemaVersion int                   `json:"schema_version"`
 		Operation     maintenance.Operation `json:"operation"`
 	}{SchemaVersion: maintenance.OperationSchemaVersion, Operation: operation}
-	if options.jsonOutput {
+	if jsonOutput {
 		encoder := json.NewEncoder(stdout)
 		encoder.SetEscapeHTML(false)
 		encoder.SetIndent("", "  ")
@@ -133,7 +150,17 @@ func parseMaintenanceRunArgs(args []string) (maintenanceRunOptions, error) {
 		switch {
 		case argument == "--json":
 			options.jsonOutput = true
-		case argument == "--plan" || argument == "--resume" || argument == "--timeout" || argument == "--return-timeout":
+		case argument == "--retry-command":
+			if options.resolution != "" {
+				return options, fmt.Errorf("command resolution options are mutually exclusive")
+			}
+			options.resolution = maintenance.CommandResolutionRetry
+		case argument == "--accept-command":
+			if options.resolution != "" {
+				return options, fmt.Errorf("command resolution options are mutually exclusive")
+			}
+			options.resolution = maintenance.CommandResolutionAccept
+		case argument == "--plan" || argument == "--resume" || argument == "--abort" || argument == "--timeout" || argument == "--return-timeout":
 			if index+1 >= len(args) {
 				return options, fmt.Errorf("%s requires a value", argument)
 			}
@@ -145,6 +172,8 @@ func parseMaintenanceRunArgs(args []string) (maintenanceRunOptions, error) {
 			options.planPath = strings.TrimPrefix(argument, "--plan=")
 		case strings.HasPrefix(argument, "--resume="):
 			options.resumeID = strings.TrimPrefix(argument, "--resume=")
+		case strings.HasPrefix(argument, "--abort="):
+			options.abortID = strings.TrimPrefix(argument, "--abort=")
 		case strings.HasPrefix(argument, "--timeout="):
 			if err := setMaintenanceRunOption(&options, "--timeout", strings.TrimPrefix(argument, "--timeout=")); err != nil {
 				return options, err
@@ -162,10 +191,19 @@ func parseMaintenanceRunArgs(args []string) (maintenanceRunOptions, error) {
 		}
 	}
 	if options.resumeID != "" {
-		if options.target != "" || options.planPath != "" || len(options.updateCommand) > 0 {
+		if options.target != "" || options.planPath != "" || options.abortID != "" || len(options.updateCommand) > 0 {
 			return options, fmt.Errorf("--resume cannot be combined with a node, plan or update command")
 		}
 		return options, nil
+	}
+	if options.abortID != "" {
+		if options.target != "" || options.planPath != "" || len(options.updateCommand) > 0 || options.resolution != "" {
+			return options, fmt.Errorf("--abort cannot be combined with a node, plan, update command or command resolution")
+		}
+		return options, nil
+	}
+	if options.resolution != "" {
+		return options, fmt.Errorf("command resolution requires --resume")
 	}
 	if options.target == "" {
 		return options, fmt.Errorf("maintenance run requires a target node")
@@ -182,6 +220,8 @@ func setMaintenanceRunOption(options *maintenanceRunOptions, name, value string)
 		options.planPath = value
 	case "--resume":
 		options.resumeID = value
+	case "--abort":
+		options.abortID = value
 	case "--timeout", "--return-timeout":
 		duration, err := time.ParseDuration(value)
 		if err != nil || duration <= 0 {
@@ -197,6 +237,28 @@ func setMaintenanceRunOption(options *maintenanceRunOptions, name, value string)
 }
 
 func reportMaintenanceRunError(err error, stdout, stderr io.Writer) int {
+	var running *maintenance.OperationAlreadyRunningError
+	if errors.As(err, &running) {
+		report(stderr, "%v\n", running)
+		return ExitSafetyGate
+	}
+	var abortSafety *maintenance.AbortSafetyError
+	if errors.As(err, &abortSafety) {
+		report(stderr, "maintenance run abort blocked: %v\n", abortSafety)
+		return ExitSafetyGate
+	}
+	var ambiguous *maintenance.AmbiguousCommandError
+	if errors.As(err, &ambiguous) {
+		report(stderr, "%v\n", ambiguous)
+		if ambiguous.Hook == "pre" {
+			report(stderr, "RECOVERY: no Swarm mutation occurred; inspect the target, then choose exactly one:\n")
+		} else {
+			report(stderr, "RECOVERY: node remains drained; inspect the target, then choose exactly one:\n")
+		}
+		report(stderr, "  skepr maintenance run --resume %s --retry-command\n", ambiguous.OperationID)
+		report(stderr, "  skepr maintenance run --resume %s --accept-command\n", ambiguous.OperationID)
+		return ExitPartialMutation
+	}
 	var safety *maintenance.SafetyError
 	if errors.As(err, &safety) {
 		for _, finding := range safety.Result.Findings {
