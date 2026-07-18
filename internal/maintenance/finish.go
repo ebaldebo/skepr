@@ -68,31 +68,60 @@ func (f Finisher) Finish(ctx context.Context, operationID string) (Operation, er
 	if err != nil {
 		return Operation{}, fmt.Errorf("reload maintenance operation %s: %w", operationID, err)
 	}
-	if operation.Phase != PhaseMaintenanceReady {
-		return operation, &FinishSafetyError{Err: fmt.Errorf("operation %s is in phase %s, expected %s", operation.ID, operation.Phase, PhaseMaintenanceReady)}
+	if operation.Run != nil && operation.Phase == PhaseMaintenanceReady && operation.Run.Phase != RunPhaseVerifyCompleted && operation.Run.Phase != RunPhaseCompleted {
+		return operation, &FinishSafetyError{Err: fmt.Errorf("maintenance run operation %s has not completed verification", operation.ID)}
 	}
-
-	inventory, err := f.Client.Inspect(ctx)
-	if err != nil {
-		return operation, fmt.Errorf("inspect Swarm before finishing maintenance: %w", err)
-	}
-	if err := validateFinishState(operation, inventory, "drain"); err != nil {
-		return operation, &FinishSafetyError{Err: err}
-	}
-	if err := f.transitionAndSave(&operation, PhaseVerifyingReturn); err != nil {
-		return operation, err
+	switch operation.Phase {
+	case PhaseMaintenanceReady, PhaseVerifyingReturn, PhaseActivating, PhaseVerifyingCluster:
+	default:
+		return operation, &FinishSafetyError{Err: fmt.Errorf("operation %s is in phase %s and cannot finish", operation.ID, operation.Phase)}
 	}
 
 	finishCtx, cancel := context.WithTimeout(ctx, f.timeout())
 	defer cancel()
-	if err := f.transitionAndSave(&operation, PhaseActivating); err != nil {
-		return operation, err
+	var activationInventory *status.Result
+	if operation.Phase == PhaseMaintenanceReady || operation.Phase == PhaseVerifyingReturn {
+		inventory, inspectErr := f.Client.Inspect(finishCtx)
+		if inspectErr != nil {
+			return operation, fmt.Errorf("inspect Swarm before finishing maintenance: %w", inspectErr)
+		}
+		if err := validateFinishState(operation, inventory, "drain"); err != nil {
+			return operation, &FinishSafetyError{Err: err}
+		}
+		activationInventory = &inventory
 	}
-	if err := f.Client.UpdateNodeAvailability(finishCtx, operation.Target.ID, "active"); err != nil {
-		return f.fail(operation, fmt.Errorf("activate target node %s: %w", operation.Target.Hostname, err))
+	if operation.Phase == PhaseMaintenanceReady {
+		if err := f.transitionAndSave(&operation, PhaseVerifyingReturn); err != nil {
+			return operation, err
+		}
 	}
-	if err := f.transitionAndSave(&operation, PhaseVerifyingCluster); err != nil {
-		return f.fail(operation, err)
+	if operation.Phase == PhaseVerifyingReturn {
+		if err := f.transitionAndSave(&operation, PhaseActivating); err != nil {
+			return operation, err
+		}
+	}
+	if operation.Phase == PhaseActivating {
+		var inventory status.Result
+		if activationInventory != nil {
+			inventory = *activationInventory
+		} else {
+			var inspectErr error
+			inventory, inspectErr = f.Client.Inspect(finishCtx)
+			if inspectErr != nil {
+				return f.fail(operation, fmt.Errorf("inspect Swarm before resuming activation: %w", inspectErr))
+			}
+		}
+		if activeErr := validateFinishState(operation, inventory, "active"); activeErr != nil {
+			if drainErr := validateFinishState(operation, inventory, "drain"); drainErr != nil {
+				return operation, &FinishSafetyError{Err: activeErr}
+			}
+			if err := f.Client.UpdateNodeAvailability(finishCtx, operation.Target.ID, "active"); err != nil {
+				return f.fail(operation, fmt.Errorf("activate target node %s: %w", operation.Target.Hostname, err))
+			}
+		}
+		if err := f.transitionAndSave(&operation, PhaseVerifyingCluster); err != nil {
+			return f.fail(operation, err)
+		}
 	}
 	if err := f.waitForHealthyCluster(finishCtx, operation); err != nil {
 		return f.fail(operation, fmt.Errorf("verify cluster after activating target: %w", err))

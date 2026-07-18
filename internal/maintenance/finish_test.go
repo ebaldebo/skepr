@@ -140,6 +140,20 @@ func TestFinishVerificationTimeoutNeverRedrains(t *testing.T) {
 	assert.Equal(t, result, store.operation)
 }
 
+func TestFinishResumesActivationIntentWithoutRedrainingOrReactivating(t *testing.T) {
+	operation := finishOperation()
+	operation.Phase = PhaseActivating
+	operation.PhaseTimestamps[PhaseActivating] = time.Now()
+	client := &finishClient{inventories: []status.Result{finishInventory("active"), finishInventory("active")}}
+	store := &finishStore{operation: operation}
+
+	result, err := (Finisher{Client: client, Store: store}).Finish(context.Background(), operation.ID)
+
+	require.NoError(t, err)
+	assert.Equal(t, PhaseCompleted, result.Phase)
+	assert.Empty(t, client.updates)
+}
+
 type finishClient struct {
 	inventories  []status.Result
 	inspectCalls int

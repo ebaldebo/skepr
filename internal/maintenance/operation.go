@@ -21,9 +21,51 @@ type Operation struct {
 	PhaseTimestamps        map[Phase]time.Time      `json:"phase_timestamps"`
 	MutationOccurred       bool                     `json:"mutation_occurred"`
 	ReconciliationAttempts []ReconciliationAttempt  `json:"reconciliation_attempts,omitempty"`
+	Run                    *RunState                `json:"run,omitempty"`
 	LastError              string                   `json:"last_error,omitempty"`
 	CreatedAt              time.Time                `json:"created_at"`
 	UpdatedAt              time.Time                `json:"updated_at"`
+}
+
+type RunPhase string
+
+const (
+	RunPhasePreRunning      RunPhase = "pre-running"
+	RunPhasePreFailed       RunPhase = "pre-failed"
+	RunPhasePreCompleted    RunPhase = "pre-completed"
+	RunPhaseUpdateRunning   RunPhase = "update-running"
+	RunPhaseUpdateFailed    RunPhase = "update-failed"
+	RunPhaseWaitingUpdate   RunPhase = "waiting-update"
+	RunPhaseUpdateCompleted RunPhase = "update-completed"
+	RunPhaseWaitingReturn   RunPhase = "waiting-return"
+	RunPhaseVerifyRunning   RunPhase = "verify-running"
+	RunPhaseVerifyFailed    RunPhase = "verify-failed"
+	RunPhaseWaitingVerify   RunPhase = "waiting-verify"
+	RunPhaseVerifyCompleted RunPhase = "verify-completed"
+	RunPhaseCompleted       RunPhase = "completed"
+)
+
+type RunState struct {
+	Phase           RunPhase               `json:"phase"`
+	TargetHostname  string                 `json:"target_hostname"`
+	DockerContexts  []string               `json:"docker_contexts"`
+	Commands        RunCommands            `json:"commands"`
+	CommandAttempts []CommandAttempt       `json:"command_attempts,omitempty"`
+	PhaseTimestamps map[RunPhase]time.Time `json:"phase_timestamps"`
+}
+
+type RunCommands struct {
+	Pre    []string `json:"pre,omitempty"`
+	Update []string `json:"update"`
+	Verify []string `json:"verify,omitempty"`
+}
+
+type CommandAttempt struct {
+	Hook        string     `json:"hook"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	ExitCode    *int       `json:"exit_code,omitempty"`
+	Error       string     `json:"error,omitempty"`
 }
 
 type ReconciliationResult string

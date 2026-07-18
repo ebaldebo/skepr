@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,6 +17,219 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMaintenanceRunExecutesPlanAndCompletesTransaction(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	planPath := filepath.Join(t.TempDir(), "maintenance.toml")
+	require.NoError(t, os.WriteFile(planPath, []byte(`[target]
+hostname = "worker-1"
+
+[commands]
+pre = ["true"]
+update = ["true"]
+verify = ["true"]
+`), 0o600))
+
+	initial := healthyMaintenanceInventory()
+	initial.DesiredTasks = nil
+	drained := initial
+	drained.Nodes = append([]status.Node(nil), initial.Nodes...)
+	drained.Nodes[1].Availability = "drain"
+	active := initial
+	connection := &maintenanceConnection{inventories: []status.Result{
+		initial,
+		initial,
+		initial,
+		drained,
+		drained,
+		drained,
+		drained,
+		active,
+	}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "run", "worker-1", "--plan", planPath, "--json"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, []maintenanceAvailabilityUpdate{
+		{nodeID: "worker-id", availability: "drain"},
+		{nodeID: "worker-id", availability: "active"},
+	}, connection.updates)
+	var result struct {
+		Operation maintenance.Operation `json:"operation"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	assert.Equal(t, maintenance.PhaseCompleted, result.Operation.Phase)
+}
+
+func TestMaintenanceRunUpdateFailureStaysDrainedAndResumes(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	marker := filepath.Join(t.TempDir(), "update-ready")
+	planPath := filepath.Join(t.TempDir(), "maintenance.toml")
+	require.NoError(t, os.WriteFile(planPath, []byte(fmt.Sprintf(`[target]
+hostname = "worker-1"
+
+[commands]
+update = ["test", "-f", %q]
+`, marker)), 0o600))
+
+	initial := healthyMaintenanceInventory()
+	initial.DesiredTasks = nil
+	drained := initial
+	drained.Nodes = append([]status.Node(nil), initial.Nodes...)
+	drained.Nodes[1].Availability = "drain"
+	beginConnection := &maintenanceConnection{inventories: []status.Result{initial, initial, initial, drained, drained}}
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "run", "worker-1", "--plan", planPath}, &fakeConnector{connection: beginConnection}, &bytes.Buffer{}, &stderr)
+
+	assert.Equal(t, ExitPartialMutation, exitCode)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	operation, err := store.ActiveForCluster("cluster-1")
+	require.NoError(t, err)
+	require.NotNil(t, operation)
+	assert.Equal(t, maintenance.RunPhaseUpdateFailed, operation.Run.Phase)
+	assert.Equal(t, []maintenanceAvailabilityUpdate{{nodeID: "worker-id", availability: "drain"}}, beginConnection.updates)
+	assert.Contains(t, stderr.String(), "skepr maintenance run --resume "+operation.ID)
+
+	require.NoError(t, os.WriteFile(marker, nil, 0o600))
+	active := initial
+	resumeConnection := &maintenanceConnection{inventories: []status.Result{drained, drained, drained, active}}
+	var stdout bytes.Buffer
+	stderr.Reset()
+
+	exitCode = Run(context.Background(), []string{"maintenance", "run", "--resume", operation.ID}, &fakeConnector{connection: resumeConnection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, []maintenanceAvailabilityUpdate{{nodeID: "worker-id", availability: "active"}}, resumeConnection.updates)
+	persisted, err := store.Load(operation.ID)
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
+	assert.Equal(t, maintenance.RunPhaseCompleted, persisted.Run.Phase)
+	assert.Len(t, persisted.Run.CommandAttempts, 2)
+}
+
+func TestMaintenanceRunResumesPersistedDrainIntentWithoutRedraining(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	require.NoError(t, store.Save(operations.Record{
+		SchemaVersion:    operations.SchemaVersion,
+		ID:               "operation-1",
+		ClusterID:        "cluster-1",
+		Target:           status.Node{ID: "worker-id", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+		Phase:            maintenance.PhaseDraining,
+		PhaseTimestamps:  map[maintenance.Phase]time.Time{maintenance.PhaseDraining: time.Now()},
+		MutationOccurred: true,
+		Run: &maintenance.RunState{
+			Phase:           maintenance.RunPhasePreCompleted,
+			TargetHostname:  "worker-1",
+			DockerContexts:  []string{""},
+			Commands:        maintenance.RunCommands{Update: []string{"true"}},
+			PhaseTimestamps: map[maintenance.RunPhase]time.Time{maintenance.RunPhasePreCompleted: time.Now()},
+		},
+	}))
+	drained := healthyMaintenanceInventory()
+	drained.DesiredTasks = nil
+	drained.Nodes[1].Availability = "drain"
+	active := healthyMaintenanceInventory()
+	active.DesiredTasks = nil
+	connection := &maintenanceConnection{inventories: []status.Result{drained, drained, drained, drained, drained, active}}
+
+	exitCode := Run(context.Background(), []string{"maintenance", "run", "--resume", "operation-1"}, &fakeConnector{connection: connection}, &bytes.Buffer{}, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, []maintenanceAvailabilityUpdate{{nodeID: "worker-id", availability: "active"}}, connection.updates)
+	persisted, err := store.Load("operation-1")
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
+}
+
+func TestMaintenanceRunVerifyFailureStaysDrainedAndResumes(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	marker := filepath.Join(t.TempDir(), "verify-ready")
+	planPath := filepath.Join(t.TempDir(), "maintenance.toml")
+	require.NoError(t, os.WriteFile(planPath, []byte(fmt.Sprintf(`[target]
+hostname = "worker-1"
+
+[commands]
+update = ["true"]
+verify = ["test", "-f", %q]
+`, marker)), 0o600))
+	initial := healthyMaintenanceInventory()
+	initial.DesiredTasks = nil
+	drained := initial
+	drained.Nodes = append([]status.Node(nil), initial.Nodes...)
+	drained.Nodes[1].Availability = "drain"
+	beginConnection := &maintenanceConnection{inventories: []status.Result{initial, initial, initial, drained, drained, drained}}
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "run", "worker-1", "--plan", planPath}, &fakeConnector{connection: beginConnection}, &bytes.Buffer{}, &stderr)
+
+	assert.Equal(t, ExitPartialMutation, exitCode)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	operation, err := store.ActiveForCluster("cluster-1")
+	require.NoError(t, err)
+	require.NotNil(t, operation)
+	assert.Equal(t, maintenance.RunPhaseVerifyFailed, operation.Run.Phase)
+	assert.Contains(t, stderr.String(), "skepr maintenance run --resume "+operation.ID)
+
+	require.NoError(t, os.WriteFile(marker, nil, 0o600))
+	active := initial
+	resumeConnection := &maintenanceConnection{inventories: []status.Result{drained, drained, active}}
+
+	exitCode = Run(context.Background(), []string{"maintenance", "run", "--resume", operation.ID}, &fakeConnector{connection: resumeConnection}, &bytes.Buffer{}, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, []maintenanceAvailabilityUpdate{{nodeID: "worker-id", availability: "active"}}, resumeConnection.updates)
+	persisted, err := store.Load(operation.ID)
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
+	assert.Len(t, persisted.Run.CommandAttempts, 3)
+}
+
+func TestMaintenanceRunReconcilesEligibleStalledSingleton(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	planPath := filepath.Join(t.TempDir(), "maintenance.toml")
+	require.NoError(t, os.WriteFile(planPath, []byte(`[target]
+hostname = "worker-1"
+
+[commands]
+update = ["true"]
+`), 0o600))
+	initial := healthyMaintenanceInventory()
+	stalled := healthyMaintenanceInventory()
+	stalled.Nodes[1].Availability = "drain"
+	stalled.DesiredTasks = nil
+	stalled.Services[0].RunningTasks = 0
+	stalled.Services[0].Converged = false
+	converged := stalled
+	converged.Services = append([]status.Service(nil), stalled.Services...)
+	converged.Services[0].RunningTasks = 1
+	converged.Services[0].Converged = true
+	active := converged
+	active.Nodes = append([]status.Node(nil), converged.Nodes...)
+	active.Nodes[1].Availability = "active"
+	connection := &maintenanceConnection{inventories: []status.Result{
+		initial, initial, initial,
+		stalled, stalled, stalled,
+		converged, converged, converged, converged, active,
+	}}
+
+	exitCode := Run(context.Background(), []string{"maintenance", "run", "worker-1", "--plan", planPath, "--timeout=5ms"}, &fakeConnector{connection: connection}, &bytes.Buffer{}, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, []string{"service-1"}, connection.forceUpdates)
+	assert.Equal(t, []maintenanceAvailabilityUpdate{
+		{nodeID: "worker-id", availability: "drain"},
+		{nodeID: "worker-id", availability: "active"},
+	}, connection.updates)
+}
 
 func TestMaintenanceBeginReachesMaintenanceReady(t *testing.T) {
 	stateHome := t.TempDir()

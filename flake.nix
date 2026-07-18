@@ -24,7 +24,7 @@
             version = self.shortRev or "dev";
             src = nixpkgs.lib.cleanSource ./.;
 
-            vendorHash = "sha256-0cgcBSDxTAjgJJ7Fbz1fPY1tWxAUyahVjkSKAHluyvE=";
+            vendorHash = "sha256-3ULPbKnV7o3mvNTk5v9hW0H9cxDNS/CdVZUQIgAv9+4=";
             subPackages = [ "cmd/skepr" ];
 
             nativeBuildInputs = [ pkgs.makeWrapper ];

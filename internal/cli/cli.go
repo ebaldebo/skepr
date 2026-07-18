@@ -60,6 +60,8 @@ func runMaintenance(ctx context.Context, args []string, contextName string, conn
 	switch args[0] {
 	case "begin":
 		return runMaintenanceBegin(ctx, args[1:], contextName, connector, stdout, stderr)
+	case "run":
+		return runMaintenanceTransaction(ctx, args[1:], contextName, connector, stdout, stderr)
 	case "finish":
 		return runMaintenanceFinish(ctx, args[1:], contextName, connector, stdout, stderr)
 	case "reconcile":
@@ -321,6 +323,11 @@ func writeMaintenanceShow(writer io.Writer, result maintenance.ShowResult) error
 	}
 	if result.Operation.LastError != "" {
 		if _, err := fmt.Fprintf(writer, "Last error: %s\n", result.Operation.LastError); err != nil {
+			return err
+		}
+	}
+	if result.Operation.Run != nil {
+		if _, err := fmt.Fprintf(writer, "Run phase: %s\nResume: skepr maintenance run --resume %s\n", result.Operation.Run.Phase, result.Operation.ID); err != nil {
 			return err
 		}
 	}
