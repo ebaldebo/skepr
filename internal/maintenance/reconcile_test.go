@@ -188,6 +188,37 @@ func TestReconcileResumesAppliedPersistedAttemptWithoutSecondForceUpdate(t *test
 	assert.Equal(t, ReconciliationConverged, result.ReconciliationAttempts[0].Result)
 }
 
+func TestReconcileRestoresStartedAttemptWhenConvergedCompletionSaveFails(t *testing.T) {
+	before := uint64(4)
+	operation := reconciliationOperation()
+	operation.Phase = PhaseReconciling
+	operation.PhaseTimestamps[PhaseReconciling] = time.Now()
+	operation.ReconciliationAttempts = []ReconciliationAttempt{{
+		ServiceID: "affected-id", Service: "database", StartedAt: time.Now(), Result: ReconciliationStarted, ForceUpdateBefore: &before,
+	}}
+	converged := reconciliationInventory()
+	converged.Services[0].ForceUpdate = 5
+	converged.Services[0].RunningTasks = 1
+	converged.Services[0].Converged = true
+	store := &reconcileStore{operation: operation, failSaveAt: 1}
+
+	result, err := (Reconciler{
+		Client: &reconcileClient{inventories: []status.Result{converged}}, Store: store,
+	}).Reconcile(context.Background(), operation.ID)
+
+	var reconcileError *ReconcileError
+	require.ErrorAs(t, err, &reconcileError)
+	assert.ErrorContains(t, err, "injected save failure")
+	assert.Equal(t, PhaseReconciling, result.Phase)
+	require.Len(t, result.ReconciliationAttempts, 1)
+	assert.Equal(t, ReconciliationStarted, result.ReconciliationAttempts[0].Result)
+	assert.Nil(t, result.ReconciliationAttempts[0].CompletedAt)
+	assert.Equal(t, PhaseReconciling, store.operation.Phase)
+	assert.Equal(t, ReconciliationStarted, store.operation.ReconciliationAttempts[0].Result)
+	assert.Nil(t, store.operation.ReconciliationAttempts[0].CompletedAt)
+	assert.Equal(t, 2, store.saveCalls)
+}
+
 func TestReconcileRetriesPersistedAttemptOnlyAfterCounterProvesNotApplied(t *testing.T) {
 	before := uint64(4)
 	operation := reconciliationOperation()
@@ -272,7 +303,9 @@ func (c *reconcileClient) ForceUpdateService(_ context.Context, serviceID string
 }
 
 type reconcileStore struct {
-	operation Operation
+	operation  Operation
+	saveCalls  int
+	failSaveAt int
 }
 
 func (s *reconcileStore) Load(string) (Operation, error) {
@@ -280,6 +313,10 @@ func (s *reconcileStore) Load(string) (Operation, error) {
 }
 
 func (s *reconcileStore) Save(operation Operation) error {
+	s.saveCalls++
+	if s.saveCalls == s.failSaveAt {
+		return errors.New("injected save failure")
+	}
 	s.operation = operation
 	return nil
 }

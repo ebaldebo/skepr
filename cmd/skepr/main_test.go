@@ -26,6 +26,7 @@ func TestSecondSignalTerminatesAfterFirstCancels(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "signal")
 			command := exec.Command(os.Args[0], "-test.run=TestSignalHelperProcess", "--", marker)
+			command.Env = append(os.Environ(), "SKEPR_TEST_SIGNAL_HELPER=1")
 			require.NoError(t, command.Start())
 			t.Cleanup(func() { _ = command.Process.Kill() })
 			require.Eventually(t, func() bool {
@@ -54,6 +55,9 @@ func TestSecondSignalTerminatesAfterFirstCancels(t *testing.T) {
 }
 
 func TestSignalHelperProcess(t *testing.T) {
+	if os.Getenv("SKEPR_TEST_SIGNAL_HELPER") != "1" {
+		return
+	}
 	separator := -1
 	for index, argument := range os.Args {
 		if argument == "--" {

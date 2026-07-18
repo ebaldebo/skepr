@@ -181,7 +181,7 @@ func (r Reconciler) resumeAttempt(ctx context.Context, operation *Operation, inv
 	}
 	if service.Converged {
 		if err := r.completeAttempt(operation); err != nil {
-			return inventory, err
+			return inventory, r.preserveStartedAttempt(operation, err)
 		}
 		return inventory, nil
 	}
