@@ -69,8 +69,8 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 	if err != nil {
 		return Operation{}, fmt.Errorf("reload maintenance operation %s: %w", operationID, err)
 	}
-	if operation.Phase != PhaseWaitingServices {
-		return operation, r.safetyError("operation %s is in phase %s, expected %s", operation.ID, operation.Phase, PhaseWaitingServices)
+	if operation.Phase != PhaseWaitingServices && operation.Phase != PhaseReconciling {
+		return operation, r.safetyError("operation %s is in phase %s, expected %s or %s", operation.ID, operation.Phase, PhaseWaitingServices, PhaseReconciling)
 	}
 
 	inventory, err := r.Client.Inspect(ctx)
@@ -80,7 +80,14 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 	if err := validateReconciliationState(operation, inventory); err != nil {
 		return operation, &ReconcileSafetyError{Err: err}
 	}
-	eligible, err := eligibleReconciliationServices(operation.TargetWorkload.AffectedServices, inventory.Services)
+	currentInventory := inventory
+	if operation.Phase == PhaseReconciling {
+		currentInventory, err = r.resumeAttempt(ctx, &operation, currentInventory)
+		if err != nil {
+			return operation, err
+		}
+	}
+	eligible, err := eligibleReconciliationServices(operation.TargetWorkload.AffectedServices, currentInventory.Services)
 	if err != nil {
 		return operation, &ReconcileSafetyError{Err: err}
 	}
@@ -93,7 +100,6 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 
 	reconcileCtx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
-	currentInventory := inventory
 	for _, candidate := range eligible {
 		var saved preflight.AffectedService
 		for _, affected := range operation.TargetWorkload.AffectedServices {
@@ -110,18 +116,23 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 			continue
 		}
 		service := currentEligible[0]
-		if err := r.transitionAndSave(&operation, PhaseReconciling); err != nil {
+		startedAt := r.now()
+		if err := operation.transition(PhaseReconciling, startedAt); err != nil {
 			return operation, err
 		}
+		forceUpdateBefore := service.ForceUpdate
 		operation.ReconciliationAttempts = append(operation.ReconciliationAttempts, ReconciliationAttempt{
-			ServiceID: service.ID,
-			Service:   service.Name,
-			StartedAt: r.now(),
-			Result:    ReconciliationStarted,
+			ServiceID:         service.ID,
+			Service:           service.Name,
+			ForceUpdateBefore: &forceUpdateBefore,
+			StartedAt:         startedAt,
+			Result:            ReconciliationStarted,
 		})
-		operation.UpdatedAt = r.now()
 		if err := r.Store.Save(operation); err != nil {
 			return operation, fmt.Errorf("persist reconciliation intent for service %s: %w", service.Name, err)
+		}
+		if r.Progress != nil {
+			r.Progress(operation)
 		}
 		if err := r.Client.ForceUpdateService(reconcileCtx, service.ID); err != nil {
 			return r.fail(operation, fmt.Errorf("force update service %s: %w", service.Name, err))
@@ -130,11 +141,7 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 		if err != nil {
 			return r.fail(operation, fmt.Errorf("wait for service %s: %w", service.Name, err))
 		}
-		completedAt := r.now()
-		attempt := &operation.ReconciliationAttempts[len(operation.ReconciliationAttempts)-1]
-		attempt.CompletedAt = &completedAt
-		attempt.Result = ReconciliationConverged
-		if err := r.transitionAndSave(&operation, PhaseWaitingServices); err != nil {
+		if err := r.completeAttempt(&operation); err != nil {
 			return r.fail(operation, err)
 		}
 	}
@@ -142,6 +149,70 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 		return r.fail(operation, err)
 	}
 	return operation, nil
+}
+
+func (r Reconciler) resumeAttempt(ctx context.Context, operation *Operation, inventory status.Result) (status.Result, error) {
+	if len(operation.ReconciliationAttempts) == 0 {
+		return inventory, r.safetyError("operation %s has no persisted reconciliation attempt", operation.ID)
+	}
+	attempt := &operation.ReconciliationAttempts[len(operation.ReconciliationAttempts)-1]
+	if attempt.Result != ReconciliationStarted || attempt.CompletedAt != nil {
+		return inventory, r.safetyError("operation %s has no incomplete reconciliation attempt", operation.ID)
+	}
+	if attempt.ForceUpdateBefore == nil {
+		return inventory, r.safetyError("operation %s reconciliation attempt for service %s has no saved force-update counter", operation.ID, attempt.Service)
+	}
+	var service status.Service
+	found := false
+	for _, current := range inventory.Services {
+		if current.ID == attempt.ServiceID {
+			service = current
+			found = true
+			break
+		}
+	}
+	if !found {
+		return inventory, r.safetyError("reconciliation service %s (%s) is missing", attempt.Service, attempt.ServiceID)
+	}
+	if service.ForceUpdate < *attempt.ForceUpdateBefore {
+		return inventory, r.safetyError("service %s force-update counter moved backwards from %d to %d", service.Name, *attempt.ForceUpdateBefore, service.ForceUpdate)
+	}
+	if service.Converged {
+		if err := r.completeAttempt(operation); err != nil {
+			return inventory, err
+		}
+		return inventory, nil
+	}
+	reconcileCtx, cancel := context.WithTimeout(ctx, r.timeout())
+	defer cancel()
+	if service.ForceUpdate == *attempt.ForceUpdateBefore {
+		if err := r.Client.ForceUpdateService(reconcileCtx, service.ID); err != nil {
+			return inventory, r.failAttempt(operation, fmt.Errorf("force update service %s after confirming the saved mutation was not applied: %w", service.Name, err))
+		}
+	}
+	var err error
+	inventory, err = r.waitForService(reconcileCtx, *operation, service.ID)
+	if err != nil {
+		return inventory, r.failAttempt(operation, fmt.Errorf("wait for service %s: %w", service.Name, err))
+	}
+	if err := r.completeAttempt(operation); err != nil {
+		return inventory, err
+	}
+	return inventory, nil
+}
+
+func (r Reconciler) completeAttempt(operation *Operation) error {
+	completedAt := r.now()
+	attempt := &operation.ReconciliationAttempts[len(operation.ReconciliationAttempts)-1]
+	attempt.CompletedAt = &completedAt
+	attempt.Result = ReconciliationConverged
+	return r.transitionAndSave(operation, PhaseWaitingServices)
+}
+
+func (r Reconciler) failAttempt(operation *Operation, cause error) error {
+	result, err := r.fail(*operation, cause)
+	*operation = result
+	return err
 }
 
 func validateReconciliationState(operation Operation, inventory status.Result) error {

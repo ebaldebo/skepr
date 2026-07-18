@@ -43,6 +43,8 @@ func TestReconcileRestartsOnlyAffectedStalledSingleton(t *testing.T) {
 	assert.Equal(t, []string{"affected-id"}, client.forceUpdates)
 	require.Len(t, result.ReconciliationAttempts, 1)
 	assert.Equal(t, "affected-id", result.ReconciliationAttempts[0].ServiceID)
+	require.NotNil(t, result.ReconciliationAttempts[0].ForceUpdateBefore)
+	assert.Equal(t, uint64(0), *result.ReconciliationAttempts[0].ForceUpdateBefore)
 	assert.Equal(t, ReconciliationConverged, result.ReconciliationAttempts[0].Result)
 }
 
@@ -125,6 +127,61 @@ func TestReconcileFailureReturnsToWaitingServicesAndRecordsAttempt(t *testing.T)
 	assert.Equal(t, ReconciliationFailed, result.ReconciliationAttempts[0].Result)
 	assert.NotNil(t, result.ReconciliationAttempts[0].CompletedAt)
 	assert.Equal(t, result, store.operation)
+}
+
+func TestReconcileResumesAppliedPersistedAttemptWithoutSecondForceUpdate(t *testing.T) {
+	before := uint64(4)
+	operation := reconciliationOperation()
+	operation.Phase = PhaseReconciling
+	operation.PhaseTimestamps[PhaseReconciling] = time.Now()
+	operation.ReconciliationAttempts = []ReconciliationAttempt{{
+		ServiceID: "affected-id", Service: "database", StartedAt: time.Now(), Result: ReconciliationStarted, ForceUpdateBefore: &before,
+	}}
+	applied := reconciliationInventory()
+	applied.Services[0].ForceUpdate = 5
+	converged := applied
+	converged.Services = append([]status.Service(nil), applied.Services...)
+	converged.Services[0].RunningTasks = 1
+	converged.Services[0].Converged = true
+	client := &reconcileClient{inventories: []status.Result{applied, converged}}
+
+	result, err := (Reconciler{
+		Client: client, Store: &reconcileStore{operation: operation}, Timeout: time.Second, PollInterval: time.Millisecond,
+	}).Reconcile(context.Background(), operation.ID)
+
+	require.NoError(t, err)
+	assert.Equal(t, PhaseMaintenanceReady, result.Phase)
+	assert.Empty(t, client.forceUpdates)
+	require.Len(t, result.ReconciliationAttempts, 1)
+	assert.Equal(t, ReconciliationConverged, result.ReconciliationAttempts[0].Result)
+}
+
+func TestReconcileRetriesPersistedAttemptOnlyAfterCounterProvesNotApplied(t *testing.T) {
+	before := uint64(4)
+	operation := reconciliationOperation()
+	operation.Phase = PhaseReconciling
+	operation.PhaseTimestamps[PhaseReconciling] = time.Now()
+	operation.ReconciliationAttempts = []ReconciliationAttempt{{
+		ServiceID: "affected-id", Service: "database", StartedAt: time.Now(), Result: ReconciliationStarted, ForceUpdateBefore: &before,
+	}}
+	unchanged := reconciliationInventory()
+	unchanged.Services[0].ForceUpdate = 4
+	converged := unchanged
+	converged.Services = append([]status.Service(nil), unchanged.Services...)
+	converged.Services[0].ForceUpdate = 5
+	converged.Services[0].RunningTasks = 1
+	converged.Services[0].Converged = true
+	client := &reconcileClient{inventories: []status.Result{unchanged, converged}}
+
+	result, err := (Reconciler{
+		Client: client, Store: &reconcileStore{operation: operation}, Timeout: time.Second, PollInterval: time.Millisecond,
+	}).Reconcile(context.Background(), operation.ID)
+
+	require.NoError(t, err)
+	assert.Equal(t, PhaseMaintenanceReady, result.Phase)
+	assert.Equal(t, []string{"affected-id"}, client.forceUpdates)
+	require.Len(t, result.ReconciliationAttempts, 1)
+	assert.Equal(t, ReconciliationConverged, result.ReconciliationAttempts[0].Result)
 }
 
 type reconcileClient struct {

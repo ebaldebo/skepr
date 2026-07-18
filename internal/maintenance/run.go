@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/ebaldebo/skepr/internal/preflight"
@@ -34,10 +35,31 @@ type CommandExecutor interface {
 type OSCommandExecutor struct{}
 
 func (OSCommandExecutor) Run(ctx context.Context, argv []string, stdout, stderr io.Writer) error {
-	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	command := exec.Command(argv[0], argv[1:]...)
 	command.Stdout = stdout
 	command.Stderr = stderr
-	return command.Run()
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- command.Wait()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		killErr := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		waitErr := <-done
+		if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+			return errors.Join(ctx.Err(), fmt.Errorf("terminate command process group: %w", killErr), waitErr)
+		}
+		return errors.Join(ctx.Err(), waitErr)
+	}
 }
 
 type TransactionRunner struct {
@@ -203,7 +225,7 @@ func (r TransactionRunner) Abort(operationID string) (Operation, error) {
 	if operation.Run == nil {
 		return operation, &AbortSafetyError{Err: fmt.Errorf("operation %s was not created by maintenance run", operation.ID)}
 	}
-	if operation.MutationOccurred || operation.Phase != PhaseCreated && operation.Phase != PhasePreflightPassed {
+	if operation.MutationOccurred || operation.Phase != PhaseCreated && operation.Phase != PhasePreflightPassed && operation.Phase != PhaseDraining {
 		return operation, &AbortSafetyError{Err: fmt.Errorf("operation %s cannot be aborted safely from phase %s", operation.ID, operation.Phase)}
 	}
 	now := r.now()
@@ -226,11 +248,11 @@ func (r TransactionRunner) resolveCommand(operation *Operation, resolution Comma
 	var retriedPhase RunPhase
 	var acceptedPhase RunPhase
 	switch operation.Run.Phase {
-	case RunPhasePreRunning:
+	case RunPhasePreRunning, RunPhasePreFailed:
 		hook, retriedPhase, acceptedPhase = "pre", RunPhasePreFailed, RunPhasePreCompleted
 	case RunPhaseUpdateRunning, RunPhaseUpdateFailed:
 		hook, retriedPhase, acceptedPhase = "update", RunPhaseUpdateFailed, RunPhaseUpdateCompleted
-	case RunPhaseVerifyRunning:
+	case RunPhaseVerifyRunning, RunPhaseVerifyFailed:
 		hook, retriedPhase, acceptedPhase = "verify", RunPhaseVerifyFailed, RunPhaseVerifyCompleted
 	default:
 		if resolution != "" {
@@ -270,7 +292,7 @@ func (r TransactionRunner) continueRun(ctx context.Context, operation Operation)
 			return operation, r.transactionError(operation, err)
 		}
 	}
-	if operation.Phase == PhaseWaitingServices {
+	if operation.Phase == PhaseWaitingServices || operation.Phase == PhaseReconciling {
 		operation, err = (Reconciler{
 			Client: r.Client, Store: r.componentStore(), Timeout: r.timeout(), PollInterval: r.pollInterval(), Progress: r.Progress,
 		}).Reconcile(ctx, operation.ID)
@@ -486,8 +508,19 @@ func (r TransactionRunner) setRunPhase(operation *Operation, phase RunPhase) err
 
 func (r TransactionRunner) transactionError(operation Operation, err error) error {
 	activationStarted := operation.Phase == PhaseActivating || operation.Phase == PhaseVerifyingCluster
-	if operation.Run != nil && operation.Run.Phase == RunPhaseUpdateFailed {
-		err = errors.Join(err, &AmbiguousCommandError{OperationID: operation.ID, Hook: "update"})
+	if operation.Run != nil {
+		var hook string
+		switch operation.Run.Phase {
+		case RunPhasePreFailed:
+			hook = "pre"
+		case RunPhaseUpdateFailed:
+			hook = "update"
+		case RunPhaseVerifyFailed:
+			hook = "verify"
+		}
+		if hook != "" {
+			err = errors.Join(err, &AmbiguousCommandError{OperationID: operation.ID, Hook: hook})
+		}
 	}
 	return &TransactionError{
 		OperationID:       operation.ID,

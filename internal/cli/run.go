@@ -257,6 +257,9 @@ func reportMaintenanceRunError(err error, stdout, stderr io.Writer) int {
 		}
 		report(stderr, "  skepr maintenance run --resume %s --retry-command\n", ambiguous.OperationID)
 		report(stderr, "  skepr maintenance run --resume %s --accept-command\n", ambiguous.OperationID)
+		if ambiguous.Hook == "pre" {
+			report(stderr, "  skepr maintenance run --abort %s\n", ambiguous.OperationID)
+		}
 		return ExitPartialMutation
 	}
 	var safety *maintenance.SafetyError
@@ -265,6 +268,11 @@ func reportMaintenanceRunError(err error, stdout, stderr io.Writer) int {
 			if finding.Level == preflight.LevelBlocker {
 				_, _ = fmt.Fprintf(stdout, "BLOCKER: %s\n", finding.Message)
 			}
+		}
+		var transactionError *maintenance.TransactionError
+		if errors.As(err, &transactionError) && transactionError.OperationID != "" && !transactionError.Drained && !transactionError.ActivationStarted {
+			report(stderr, "RECOVERY: no Swarm mutation occurred; resume with: skepr maintenance run --resume %s\n", transactionError.OperationID)
+			report(stderr, "ABORT: skepr maintenance run --abort %s\n", transactionError.OperationID)
 		}
 		return ExitSafetyGate
 	}
@@ -281,6 +289,7 @@ func reportMaintenanceRunError(err error, stdout, stderr io.Writer) int {
 		}
 		if transactionError.OperationID != "" {
 			report(stderr, "RECOVERY: no Swarm mutation occurred; resume with: skepr maintenance run --resume %s\n", transactionError.OperationID)
+			report(stderr, "ABORT: skepr maintenance run --abort %s\n", transactionError.OperationID)
 			return ExitSafetyGate
 		}
 	}

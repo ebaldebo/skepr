@@ -30,6 +30,7 @@ var allowedTransitions = map[Phase]map[Phase]struct{}{
 	},
 	PhaseDraining: {
 		PhaseEvacuating: {},
+		PhaseAborted:    {},
 	},
 	PhaseEvacuating: {
 		PhaseWaitingServices: {},

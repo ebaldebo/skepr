@@ -191,15 +191,58 @@ verify = ["test", "-f", %q]
 	require.NoError(t, os.WriteFile(marker, nil, 0o600))
 	active := initial
 	resumeConnection := &maintenanceConnection{inventories: []status.Result{drained, drained, active}}
+	stderr.Reset()
 
 	exitCode = Run(context.Background(), []string{"maintenance", "run", "--resume", operation.ID}, &fakeConnector{connection: resumeConnection}, &bytes.Buffer{}, &bytes.Buffer{})
 
+	assert.Equal(t, ExitPartialMutation, exitCode)
+	persisted, err := store.Load(operation.ID)
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.RunPhaseVerifyFailed, persisted.Run.Phase)
+	assert.Len(t, persisted.Run.CommandAttempts, 2)
+	assert.Empty(t, resumeConnection.updates)
+
+	exitCode = Run(context.Background(), []string{"maintenance", "run", "--resume", operation.ID, "--retry-command"}, &fakeConnector{connection: resumeConnection}, &bytes.Buffer{}, &bytes.Buffer{})
+
 	assert.Equal(t, ExitSuccess, exitCode)
 	assert.Equal(t, []maintenanceAvailabilityUpdate{{nodeID: "worker-id", availability: "active"}}, resumeConnection.updates)
-	persisted, err := store.Load(operation.ID)
+	persisted, err = store.Load(operation.ID)
 	require.NoError(t, err)
 	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
 	assert.Len(t, persisted.Run.CommandAttempts, 3)
+}
+
+func TestMaintenanceRunDoesNotRetryFailedPreCommandWithoutResolution(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	require.NoError(t, store.Save(operations.Record{
+		SchemaVersion:   operations.SchemaVersion,
+		ID:              "operation-1",
+		ClusterID:       "cluster-1",
+		Phase:           maintenance.PhasePreflightPassed,
+		PhaseTimestamps: map[maintenance.Phase]time.Time{maintenance.PhasePreflightPassed: time.Now()},
+		Run: &maintenance.RunState{
+			Phase:           maintenance.RunPhasePreFailed,
+			TargetHostname:  "worker-1",
+			Commands:        maintenance.RunCommands{Pre: []string{"false"}, Update: []string{"true"}},
+			PhaseTimestamps: map[maintenance.RunPhase]time.Time{maintenance.RunPhasePreFailed: time.Now()},
+			CommandAttempts: []maintenance.CommandAttempt{{Hook: "pre", StartedAt: time.Now()}},
+		},
+	}))
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{"maintenance", "run", "--resume", "operation-1"}, maintenanceConnectorError{}, &bytes.Buffer{}, &stderr)
+
+	assert.Equal(t, ExitPartialMutation, exitCode)
+	assert.Contains(t, stderr.String(), "ambiguous pre command result")
+	assert.Contains(t, stderr.String(), "--retry-command")
+	assert.Contains(t, stderr.String(), "--accept-command")
+	assert.Contains(t, stderr.String(), "skepr maintenance run --abort operation-1")
+	persisted, err := store.Load("operation-1")
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.RunPhasePreFailed, persisted.Run.Phase)
+	assert.Len(t, persisted.Run.CommandAttempts, 1)
 }
 
 func TestMaintenanceRunReconcilesEligibleStalledSingleton(t *testing.T) {
@@ -347,6 +390,50 @@ func TestMaintenanceRunRefusesToAbortAfterDrainIntent(t *testing.T) {
 	persisted, err := store.Load("operation-1")
 	require.NoError(t, err)
 	assert.Equal(t, maintenance.PhaseDraining, persisted.Phase)
+}
+
+func TestMaintenanceRunAbortsPersistedDrainingPhaseBeforeMutationIntent(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	require.NoError(t, store.Save(operations.Record{
+		SchemaVersion:   operations.SchemaVersion,
+		ID:              "operation-1",
+		ClusterID:       "cluster-1",
+		Phase:           maintenance.PhaseDraining,
+		PhaseTimestamps: map[maintenance.Phase]time.Time{maintenance.PhaseDraining: time.Now()},
+		Run: &maintenance.RunState{
+			Phase:           maintenance.RunPhasePreCompleted,
+			TargetHostname:  "worker-1",
+			Commands:        maintenance.RunCommands{Update: []string{"true"}},
+			PhaseTimestamps: map[maintenance.RunPhase]time.Time{maintenance.RunPhasePreCompleted: time.Now()},
+		},
+	}))
+
+	exitCode := Run(context.Background(), []string{"maintenance", "run", "--abort", "operation-1"}, maintenanceConnectorError{}, &bytes.Buffer{}, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	persisted, err := store.Load("operation-1")
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseAborted, persisted.Phase)
+}
+
+func TestMaintenanceRunPostPreflightSafetyFailureIncludesAbortGuidance(t *testing.T) {
+	err := &maintenance.TransactionError{
+		OperationID: "operation-1",
+		Err: &maintenance.SafetyError{Result: preflight.Result{Findings: []preflight.Finding{{
+			Level: preflight.LevelBlocker, Message: "target changed after pre command",
+		}}}},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := reportMaintenanceRunError(err, &stdout, &stderr)
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Contains(t, stdout.String(), "BLOCKER: target changed after pre command")
+	assert.Contains(t, stderr.String(), "skepr maintenance run --resume operation-1")
+	assert.Contains(t, stderr.String(), "skepr maintenance run --abort operation-1")
 }
 
 func TestMaintenanceBeginReachesMaintenanceReady(t *testing.T) {

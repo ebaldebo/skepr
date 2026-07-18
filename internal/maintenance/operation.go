@@ -83,12 +83,13 @@ const (
 )
 
 type ReconciliationAttempt struct {
-	ServiceID   string               `json:"service_id"`
-	Service     string               `json:"service"`
-	StartedAt   time.Time            `json:"started_at"`
-	CompletedAt *time.Time           `json:"completed_at,omitempty"`
-	Result      ReconciliationResult `json:"result"`
-	Error       string               `json:"error,omitempty"`
+	ServiceID         string               `json:"service_id"`
+	Service           string               `json:"service"`
+	ForceUpdateBefore *uint64              `json:"force_update_before,omitempty"`
+	StartedAt         time.Time            `json:"started_at"`
+	CompletedAt       *time.Time           `json:"completed_at,omitempty"`
+	Result            ReconciliationResult `json:"result"`
+	Error             string               `json:"error,omitempty"`
 }
 
 func (o *Operation) transition(next Phase, now time.Time) error {

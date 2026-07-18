@@ -19,6 +19,7 @@ func TestValidateTransition(t *testing.T) {
 		{name: "created to aborted", current: PhaseCreated, next: PhaseAborted},
 		{name: "preflight passed to draining", current: PhasePreflightPassed, next: PhaseDraining},
 		{name: "preflight passed to aborted", current: PhasePreflightPassed, next: PhaseAborted},
+		{name: "draining without mutation to aborted", current: PhaseDraining, next: PhaseAborted},
 		{name: "draining to evacuating", current: PhaseDraining, next: PhaseEvacuating},
 		{name: "evacuating to waiting services", current: PhaseEvacuating, next: PhaseWaitingServices},
 		{name: "waiting services to maintenance ready", current: PhaseWaitingServices, next: PhaseMaintenanceReady},
