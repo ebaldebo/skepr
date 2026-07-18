@@ -120,6 +120,33 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
 
+	var runOutput bytes.Buffer
+	var runErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{
+		"maintenance", "run", "worker-1", "--timeout", "30s", "--return-timeout", "30s", "--json", "--", "true",
+	}, connector, &runOutput, &runErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, runErrors.String())
+	var runResult struct {
+		Operation maintenance.Operation `json:"operation"`
+	}
+	require.NoError(t, json.Unmarshal(runOutput.Bytes(), &runResult))
+	assert.Equal(t, "worker-1", runResult.Operation.Target.Hostname)
+	assert.Equal(t, maintenance.PhaseCompleted, runResult.Operation.Phase)
+	require.NotNil(t, runResult.Operation.Run)
+	assert.Equal(t, maintenance.RunPhaseCompleted, runResult.Operation.Run.Phase)
+	require.Len(t, runResult.Operation.Run.CommandAttempts, 1)
+	assert.Equal(t, "update", runResult.Operation.Run.CommandAttempts[0].Hook)
+	persisted, err = store.Load(runResult.Operation.ID)
+	require.NoError(t, err)
+	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
+	inventory, err = connection.Inspect(context.Background())
+	require.NoError(t, err)
+	for _, node := range inventory.Nodes {
+		if node.Hostname == "worker-1" {
+			assert.Equal(t, "active", node.Availability)
+		}
+	}
+
 	var secondBeginOutput bytes.Buffer
 	var secondBeginErrors bytes.Buffer
 	exitCode = cli.Run(context.Background(), []string{"maintenance", "begin", "worker-2", "--timeout", "30s"}, connector, &secondBeginOutput, &secondBeginErrors)
@@ -182,9 +209,39 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	updated, err := engine.ServiceInspect(context.Background(), created.ID, mobyclient.ServiceInspectOptions{})
 	require.NoError(t, err)
 	assert.Greater(t, updated.Service.Version.Index, beforeReconcile.Service.Version.Index, reconcileErrors.String())
+	assert.Greater(t, updated.Service.Spec.TaskTemplate.ForceUpdate, beforeReconcile.Service.Spec.TaskTemplate.ForceUpdate, reconcileErrors.String())
 	persisted, err = store.Load(operation.ID)
 	require.NoError(t, err)
-	assert.Equal(t, maintenance.PhaseWaitingServices, persisted.Phase)
+	assert.Equal(t, maintenance.PhaseReconciling, persisted.Phase)
 	require.Len(t, persisted.ReconciliationAttempts, 1)
-	assert.Equal(t, maintenance.ReconciliationFailed, persisted.ReconciliationAttempts[0].Result)
+	assert.Equal(t, maintenance.ReconciliationStarted, persisted.ReconciliationAttempts[0].Result)
+	assert.Nil(t, persisted.ReconciliationAttempts[0].CompletedAt)
+	require.NotNil(t, persisted.ReconciliationAttempts[0].ForceUpdateBefore)
+	assert.Equal(t, beforeReconcile.Service.Spec.TaskTemplate.ForceUpdate, *persisted.ReconciliationAttempts[0].ForceUpdateBefore)
+
+	zero := uint64(0)
+	recoverySpec := updated.Service.Spec
+	recoverySpec.Mode.Replicated.Replicas = &zero
+	_, err = engine.ServiceUpdate(context.Background(), created.ID, mobyclient.ServiceUpdateOptions{
+		Version:          updated.Service.Version,
+		Spec:             recoverySpec,
+		RegistryAuthFrom: swarm.RegistryAuthFromSpec,
+	})
+	require.NoError(t, err)
+	forceUpdateAfterTimeout := updated.Service.Spec.TaskTemplate.ForceUpdate
+
+	var resumeReconcileOutput bytes.Buffer
+	var resumeReconcileErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"maintenance", "reconcile", operation.ID, "--timeout", "30s"}, connector, &resumeReconcileOutput, &resumeReconcileErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, resumeReconcileErrors.String())
+	assert.Contains(t, resumeReconcileOutput.String(), "Phase: maintenance-ready")
+	resumedService, err := engine.ServiceInspect(context.Background(), created.ID, mobyclient.ServiceInspectOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, forceUpdateAfterTimeout, resumedService.Service.Spec.TaskTemplate.ForceUpdate)
+
+	var recoveredFinishOutput bytes.Buffer
+	var recoveredFinishErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"maintenance", "finish", operation.ID, "--timeout", "30s"}, connector, &recoveredFinishOutput, &recoveredFinishErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, recoveredFinishErrors.String())
+	assert.Contains(t, recoveredFinishOutput.String(), "Phase: completed")
 }

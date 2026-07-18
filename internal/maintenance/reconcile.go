@@ -135,18 +135,20 @@ func (r Reconciler) Reconcile(ctx context.Context, operationID string) (Operatio
 			r.Progress(operation)
 		}
 		if err := r.Client.ForceUpdateService(reconcileCtx, service.ID); err != nil {
-			return r.fail(operation, fmt.Errorf("force update service %s: %w", service.Name, err))
+			cause := fmt.Errorf("force update service %s: %w", service.Name, err)
+			return operation, r.preserveStartedAttempt(&operation, cause)
 		}
 		currentInventory, err = r.waitForService(reconcileCtx, operation, service.ID)
 		if err != nil {
-			return r.fail(operation, fmt.Errorf("wait for service %s: %w", service.Name, err))
+			cause := fmt.Errorf("wait for service %s: %w", service.Name, err)
+			return operation, r.preserveStartedAttempt(&operation, cause)
 		}
 		if err := r.completeAttempt(&operation); err != nil {
-			return r.fail(operation, err)
+			return operation, r.preserveStartedAttempt(&operation, err)
 		}
 	}
 	if err := r.transitionAndSave(&operation, PhaseMaintenanceReady); err != nil {
-		return r.fail(operation, err)
+		return operation, r.recordError(&operation, err)
 	}
 	return operation, nil
 }
@@ -187,16 +189,18 @@ func (r Reconciler) resumeAttempt(ctx context.Context, operation *Operation, inv
 	defer cancel()
 	if service.ForceUpdate == *attempt.ForceUpdateBefore {
 		if err := r.Client.ForceUpdateService(reconcileCtx, service.ID); err != nil {
-			return inventory, r.failAttempt(operation, fmt.Errorf("force update service %s after confirming the saved mutation was not applied: %w", service.Name, err))
+			cause := fmt.Errorf("force update service %s after confirming the saved mutation was not applied: %w", service.Name, err)
+			return inventory, r.preserveStartedAttempt(operation, cause)
 		}
 	}
 	var err error
 	inventory, err = r.waitForService(reconcileCtx, *operation, service.ID)
 	if err != nil {
-		return inventory, r.failAttempt(operation, fmt.Errorf("wait for service %s: %w", service.Name, err))
+		cause := fmt.Errorf("wait for service %s: %w", service.Name, err)
+		return inventory, r.preserveStartedAttempt(operation, cause)
 	}
 	if err := r.completeAttempt(operation); err != nil {
-		return inventory, err
+		return inventory, r.preserveStartedAttempt(operation, err)
 	}
 	return inventory, nil
 }
@@ -206,13 +210,8 @@ func (r Reconciler) completeAttempt(operation *Operation) error {
 	attempt := &operation.ReconciliationAttempts[len(operation.ReconciliationAttempts)-1]
 	attempt.CompletedAt = &completedAt
 	attempt.Result = ReconciliationConverged
+	attempt.Error = ""
 	return r.transitionAndSave(operation, PhaseWaitingServices)
-}
-
-func (r Reconciler) failAttempt(operation *Operation, cause error) error {
-	result, err := r.fail(*operation, cause)
-	*operation = result
-	return err
 }
 
 func validateReconciliationState(operation Operation, inventory status.Result) error {
@@ -296,23 +295,28 @@ func (r Reconciler) transitionAndSave(operation *Operation, next Phase) error {
 	return nil
 }
 
-func (r Reconciler) fail(operation Operation, cause error) (Operation, error) {
-	completedAt := r.now()
+func (r Reconciler) preserveStartedAttempt(operation *Operation, cause error) error {
+	now := r.now()
 	attempt := &operation.ReconciliationAttempts[len(operation.ReconciliationAttempts)-1]
-	attempt.CompletedAt = &completedAt
-	attempt.Result = ReconciliationFailed
+	attempt.CompletedAt = nil
+	attempt.Result = ReconciliationStarted
 	attempt.Error = cause.Error()
-	if operation.Phase == PhaseReconciling {
-		if err := operation.transition(PhaseWaitingServices, completedAt); err != nil {
-			cause = fmt.Errorf("%v; return operation to waiting-services: %w", cause, err)
-		}
-	}
+	operation.Phase = PhaseReconciling
 	operation.LastError = cause.Error()
-	operation.UpdatedAt = completedAt
-	if err := r.Store.Save(operation); err != nil {
+	operation.UpdatedAt = now
+	if err := r.Store.Save(*operation); err != nil {
 		cause = fmt.Errorf("%v; persist operation error: %w", cause, err)
 	}
-	return operation, &ReconcileError{OperationID: operation.ID, Phase: operation.Phase, Err: cause}
+	return &ReconcileError{OperationID: operation.ID, Phase: operation.Phase, Err: cause}
+}
+
+func (r Reconciler) recordError(operation *Operation, cause error) error {
+	operation.LastError = cause.Error()
+	operation.UpdatedAt = r.now()
+	if err := r.Store.Save(*operation); err != nil {
+		cause = fmt.Errorf("%v; persist operation error: %w", cause, err)
+	}
+	return &ReconcileError{OperationID: operation.ID, Phase: operation.Phase, Err: cause}
 }
 
 func (r Reconciler) safetyError(format string, arguments ...any) error {

@@ -7,7 +7,7 @@ import (
 	"github.com/ebaldebo/skepr/internal/status"
 )
 
-const OperationSchemaVersion = 1
+const OperationSchemaVersion = 2
 
 type Operation struct {
 	SchemaVersion          int                      `json:"schema_version"`
@@ -79,7 +79,6 @@ type ReconciliationResult string
 const (
 	ReconciliationStarted   ReconciliationResult = "started"
 	ReconciliationConverged ReconciliationResult = "converged"
-	ReconciliationFailed    ReconciliationResult = "failed"
 )
 
 type ReconciliationAttempt struct {

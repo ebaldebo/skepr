@@ -41,7 +41,7 @@ func (s *Store) Save(record Record) error {
 		return err
 	}
 	if record.SchemaVersion != SchemaVersion {
-		return fmt.Errorf("unsupported operation schema version %d", record.SchemaVersion)
+		return fmt.Errorf("unsupported operation schema version %d, expected %d", record.SchemaVersion, SchemaVersion)
 	}
 	if err := os.MkdirAll(s.operationsDir, 0o700); err != nil {
 		return fmt.Errorf("create operation directory: %w", err)
@@ -111,7 +111,7 @@ func (s *Store) Load(id string) (Record, error) {
 		return Record{}, fmt.Errorf("decode operation %q: %w", id, err)
 	}
 	if record.SchemaVersion != SchemaVersion {
-		return Record{}, fmt.Errorf("unsupported operation schema version %d", record.SchemaVersion)
+		return Record{}, fmt.Errorf("unsupported operation schema version %d, expected %d", record.SchemaVersion, SchemaVersion)
 	}
 	if record.ID != id {
 		return Record{}, fmt.Errorf("operation file %q contains ID %q", id, record.ID)

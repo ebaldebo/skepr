@@ -109,7 +109,7 @@ func TestReconcileRejectsUnsafeLiveStateWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestReconcileFailureReturnsToWaitingServicesAndRecordsAttempt(t *testing.T) {
+func TestReconcileMutationFailurePreservesStartedAttemptForInspection(t *testing.T) {
 	operation := reconciliationOperation()
 	client := &reconcileClient{
 		inventories: []status.Result{reconciliationInventory()},
@@ -121,12 +121,44 @@ func TestReconcileFailureReturnsToWaitingServicesAndRecordsAttempt(t *testing.T)
 
 	var reconcileError *ReconcileError
 	require.ErrorAs(t, err, &reconcileError)
-	assert.Equal(t, PhaseWaitingServices, result.Phase)
+	assert.Equal(t, PhaseReconciling, result.Phase)
 	assert.Contains(t, result.LastError, "manager lost the update response")
 	require.Len(t, result.ReconciliationAttempts, 1)
-	assert.Equal(t, ReconciliationFailed, result.ReconciliationAttempts[0].Result)
-	assert.NotNil(t, result.ReconciliationAttempts[0].CompletedAt)
+	assert.Equal(t, ReconciliationStarted, result.ReconciliationAttempts[0].Result)
+	assert.Nil(t, result.ReconciliationAttempts[0].CompletedAt)
+	require.NotNil(t, result.ReconciliationAttempts[0].ForceUpdateBefore)
+	assert.Equal(t, uint64(0), *result.ReconciliationAttempts[0].ForceUpdateBefore)
 	assert.Equal(t, result, store.operation)
+}
+
+func TestReconcileConvergenceTimeoutPreservesStartedAttemptAndResumesWithoutDuplicateMutation(t *testing.T) {
+	operation := reconciliationOperation()
+	client := &stalledReconcileClient{inventory: reconciliationInventory()}
+	store := &reconcileStore{operation: operation}
+
+	result, err := (Reconciler{
+		Client: client, Store: store, Timeout: 5 * time.Millisecond, PollInterval: time.Millisecond,
+	}).Reconcile(context.Background(), operation.ID)
+
+	var reconcileError *ReconcileError
+	require.ErrorAs(t, err, &reconcileError)
+	assert.Equal(t, PhaseReconciling, result.Phase)
+	require.Len(t, result.ReconciliationAttempts, 1)
+	assert.Equal(t, ReconciliationStarted, result.ReconciliationAttempts[0].Result)
+	assert.Nil(t, result.ReconciliationAttempts[0].CompletedAt)
+	assert.Equal(t, 1, client.forceUpdates)
+
+	client.inventory.Services[0].ForceUpdate = 1
+	client.inventory.Services[0].RunningTasks = 1
+	client.inventory.Services[0].Converged = true
+	result, err = (Reconciler{
+		Client: client, Store: store, Timeout: time.Second, PollInterval: time.Millisecond,
+	}).Reconcile(context.Background(), operation.ID)
+
+	require.NoError(t, err)
+	assert.Equal(t, PhaseMaintenanceReady, result.Phase)
+	assert.Equal(t, 1, client.forceUpdates)
+	assert.Empty(t, result.ReconciliationAttempts[0].Error)
 }
 
 func TestReconcileResumesAppliedPersistedAttemptWithoutSecondForceUpdate(t *testing.T) {
@@ -193,6 +225,20 @@ type reconcileClient struct {
 
 type changingReconcileClient struct {
 	forceUpdates []string
+}
+
+type stalledReconcileClient struct {
+	inventory    status.Result
+	forceUpdates int
+}
+
+func (c *stalledReconcileClient) Inspect(context.Context) (status.Result, error) {
+	return c.inventory, nil
+}
+
+func (c *stalledReconcileClient) ForceUpdateService(context.Context, string) error {
+	c.forceUpdates++
+	return nil
 }
 
 func (c *changingReconcileClient) Inspect(context.Context) (status.Result, error) {

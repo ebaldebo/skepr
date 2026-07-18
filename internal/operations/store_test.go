@@ -70,3 +70,20 @@ func TestStoreSavesAndLoadsOperationAtomically(t *testing.T) {
 	require.Len(t, entries, 1)
 	assert.Equal(t, "operation-1.json", entries[0].Name())
 }
+
+func TestStoreRejectsSchemaV1ActiveOperation(t *testing.T) {
+	stateDir := t.TempDir()
+	operationsDir := filepath.Join(stateDir, "operations")
+	require.NoError(t, os.MkdirAll(operationsDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(operationsDir, "operation-1.json"), []byte(`{
+  "schema_version": 1,
+  "id": "operation-1",
+  "cluster_id": "cluster-1",
+  "phase": "reconciling"
+}
+`), 0o600))
+
+	_, err := NewStore(stateDir).ActiveForCluster("cluster-1")
+
+	assert.ErrorContains(t, err, "unsupported operation schema version 1, expected 2")
+}
