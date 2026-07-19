@@ -147,12 +147,17 @@ func runServiceDiagnose(ctx context.Context, args []string, contextName string, 
 	} else {
 		_, _ = fmt.Fprintf(&output, "Required resources: %s\n", diagnosis.PlacementEligibility.RequiredResources)
 	}
+	if diagnosis.PlacementEligibility.MaxReplicasPerNode == 0 {
+		output.WriteString("Maximum replicas per node: unlimited\n")
+	} else {
+		_, _ = fmt.Fprintf(&output, "Maximum replicas per node: %d\n", diagnosis.PlacementEligibility.MaxReplicasPerNode)
+	}
 	if len(diagnosis.PlacementEligibility.UnevaluatedConstraints) == 0 {
 		output.WriteString("Unevaluated constraints: none\n")
 	} else {
 		_, _ = fmt.Fprintf(&output, "Unevaluated constraints: %s\n", strings.Join(diagnosis.PlacementEligibility.UnevaluatedConstraints, ", "))
 	}
-	output.WriteString("Other inputs not evaluated: generic resources, replica limits, ports, storage\n")
+	output.WriteString("Other inputs not evaluated: generic resources, ports, storage\n")
 	if _, err := io.WriteString(stdout, output.String()); err != nil {
 		report(stderr, "write service diagnosis output: %v\n", err)
 		return ExitDockerConnection

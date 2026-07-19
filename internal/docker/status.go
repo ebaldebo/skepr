@@ -134,6 +134,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			PlacementConstraints: placementConstraints(service.Spec.TaskTemplate.Placement),
 			RequiredPlatforms:    requiredPlatforms(service.Spec.TaskTemplate.Placement),
 			Reservations:         resourceReservations(service.Spec.TaskTemplate.Resources),
+			MaxReplicasPerNode:   maxReplicasPerNode(service.Spec.TaskTemplate.Placement),
 		})
 	}
 	sort.Slice(result.Services, func(a, b int) bool {
@@ -222,6 +223,13 @@ func requiredPlatforms(placement *swarm.Placement) []status.Platform {
 		platforms = append(platforms, status.Platform{OS: platform.OS, Architecture: platform.Architecture})
 	}
 	return platforms
+}
+
+func maxReplicasPerNode(placement *swarm.Placement) uint64 {
+	if placement == nil {
+		return 0
+	}
+	return placement.MaxReplicas
 }
 
 func resourceReservations(requirements *swarm.ResourceRequirements) status.Resources {

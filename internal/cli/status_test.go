@@ -295,8 +295,9 @@ Placement eligibility:
 Evaluated constraints: none
 Required platforms: any
 Required resources: none
+Maximum replicas per node: unlimited
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, ports, storage
 `, stdout.String())
 }
 
@@ -308,7 +309,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
 
 	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.JSONEq(t, `{
-  "schema_version": 5,
+  "schema_version": 6,
   "health": "degraded",
   "service": {
     "id": "s2",
@@ -346,11 +347,11 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
       "node_availability",
       "placement_constraints",
       "platform_requirements",
-      "cpu_memory_reservations"
+      "cpu_memory_reservations",
+      "maximum_replicas_per_node"
     ],
     "unevaluated_inputs": [
       "generic_resources",
-      "maximum_replicas_per_node",
       "host_published_port_conflicts",
       "storage_portability"
     ],
@@ -361,23 +362,27 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
       "nano_cpus": 0,
       "memory_bytes": 0
     },
+    "max_replicas_per_node": 0,
     "nodes": [
       {
         "id": "m1",
         "hostname": "manager-1",
         "passes_evaluated_checks": true,
+        "active_service_tasks": 0,
         "blockers": []
       },
       {
         "id": "m2",
         "hostname": "manager-2",
         "passes_evaluated_checks": true,
+        "active_service_tasks": 0,
         "blockers": []
       },
       {
         "id": "w1",
         "hostname": "worker-1",
         "passes_evaluated_checks": true,
+        "active_service_tasks": 0,
         "blockers": []
       }
     ]
@@ -409,8 +414,9 @@ Placement eligibility:
 Evaluated constraints: none
 Required platforms: any
 Required resources: none
+Maximum replicas per node: unlimited
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, ports, storage
 `, stdout.String())
 }
 
@@ -446,8 +452,9 @@ Placement eligibility:
 Evaluated constraints: none
 Required platforms: any
 Required resources: none
+Maximum replicas per node: unlimited
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, ports, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -498,8 +505,9 @@ Placement eligibility:
 Evaluated constraints: node.labels.region==east
 Required platforms: any
 Required resources: none
+Maximum replicas per node: unlimited
 Unevaluated constraints: engine.labels.storage==ssd
-Other inputs not evaluated: generic resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, ports, storage
 `, stdout.String())
 }
 
@@ -573,8 +581,9 @@ Placement eligibility:
 Evaluated constraints: none
 Required platforms: linux/amd64
 Required resources: none
+Maximum replicas per node: unlimited
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, ports, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -627,8 +636,9 @@ Placement eligibility:
 Evaluated constraints: none
 Required platforms: any
 Required resources: 2 CPUs, 2 GiB memory
+Maximum replicas per node: unlimited
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, ports, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -673,6 +683,61 @@ func TestServiceDiagnosisCountsActiveAssignedTaskReservations(t *testing.T) {
 			assert.Equal(t, test.wantReserved, diagnosis.PlacementEligibility.Nodes[0].Resources.Reserved)
 		})
 	}
+}
+
+func TestServiceDiagnoseReportsMaximumReplicasPerNodeEligibility(t *testing.T) {
+	t.Parallel()
+
+	connector := &fakeConnector{connection: resultInspector{result: status.Result{
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "worker-1", State: "ready", Availability: "active"},
+			{ID: "w2", Hostname: "worker-2", State: "ready", Availability: "active"},
+			{ID: "w3", Hostname: "worker-3", State: "ready", Availability: "active"},
+		},
+		Services: []status.Service{
+			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 1, DesiredTasks: 3, MaxReplicasPerNode: 1},
+		},
+		Tasks: []status.Task{
+			{ID: "t1", ServiceID: "s1", NodeID: "w1", State: "running"},
+			{ID: "t2", ServiceID: "s1", NodeID: "w2", State: "preparing"},
+			{ID: "old", ServiceID: "s1", NodeID: "w3", DesiredState: "running", State: "failed"},
+			{ID: "other", ServiceID: "s2", NodeID: "w3", State: "running"},
+		},
+	}}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "api"}, connector, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED service api
+Mode: replicated
+Tasks: 1/3 running
+
+Current failures: none
+
+Recent terminal tasks: none
+
+Placement eligibility:
+  worker-1  blocked: service already has 1 active task, limit is 1
+  worker-2  blocked: service already has 1 active task, limit is 1
+  worker-3  passes evaluated checks
+Evaluated constraints: none
+Required platforms: any
+Required resources: none
+Maximum replicas per node: 1
+Unevaluated constraints: none
+Other inputs not evaluated: generic resources, ports, storage
+`, stdout.String())
+
+	stdout.Reset()
+	exitCode = Run(context.Background(), []string{"service", "diagnose", "api", "--json"}, connector, &stdout, &bytes.Buffer{})
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	var diagnosis status.ServiceDiagnosis
+	assert.NoError(t, json.Unmarshal(stdout.Bytes(), &diagnosis))
+	assert.Equal(t, uint64(1), diagnosis.PlacementEligibility.MaxReplicasPerNode)
+	assert.Equal(t, uint64(1), diagnosis.PlacementEligibility.Nodes[0].ActiveServiceTasks)
+	assert.Equal(t, "max_replicas_per_node", diagnosis.PlacementEligibility.Nodes[0].Blockers[0].Code)
+	assert.Equal(t, uint64(0), diagnosis.PlacementEligibility.Nodes[2].ActiveServiceTasks)
+	assert.True(t, diagnosis.PlacementEligibility.Nodes[2].PassesEvaluatedChecks)
 }
 
 func TestAssessHealthEvaluatesNodeAndManagerHealth(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 
 const SchemaVersion = 1
 const HealthSchemaVersion = 2
-const ServiceDiagnosisSchemaVersion = 5
+const ServiceDiagnosisSchemaVersion = 6
 
 type Resources struct {
 	NanoCPUs    int64 `json:"nano_cpus"`
@@ -79,6 +79,7 @@ type Service struct {
 	PlacementConstraints []string   `json:"-"`
 	RequiredPlatforms    []Platform `json:"-"`
 	Reservations         Resources  `json:"-"`
+	MaxReplicasPerNode   uint64     `json:"-"`
 }
 
 type Task struct {
@@ -164,6 +165,7 @@ type PlacementEligibility struct {
 	UnevaluatedConstraints []string                   `json:"unevaluated_constraints"`
 	RequiredPlatforms      []Platform                 `json:"required_platforms"`
 	RequiredResources      Resources                  `json:"required_resources"`
+	MaxReplicasPerNode     uint64                     `json:"max_replicas_per_node"`
 	Nodes                  []NodePlacementEligibility `json:"nodes"`
 }
 
@@ -173,6 +175,7 @@ type NodePlacementEligibility struct {
 	PassesEvaluatedChecks bool               `json:"passes_evaluated_checks"`
 	Blockers              []PlacementBlocker `json:"blockers"`
 	Resources             NodeResources      `json:"resources,omitzero"`
+	ActiveServiceTasks    uint64             `json:"active_service_tasks"`
 }
 
 type NodeResources struct {
@@ -243,22 +246,26 @@ func assessNodePlacement(inventory Result, service Service) PlacementEligibility
 		evaluatedConstraints = append(evaluatedConstraints, constraint.raw)
 	}
 	eligibility := PlacementEligibility{
-		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations"},
-		UnevaluatedInputs:      []string{"generic_resources", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability"},
+		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations", "maximum_replicas_per_node"},
+		UnevaluatedInputs:      []string{"generic_resources", "host_published_port_conflicts", "storage_portability"},
 		EvaluatedConstraints:   evaluatedConstraints,
 		UnevaluatedConstraints: unevaluatedConstraints,
 		RequiredPlatforms:      append([]Platform{}, service.RequiredPlatforms...),
 		RequiredResources:      service.Reservations,
+		MaxReplicasPerNode:     service.MaxReplicasPerNode,
 		Nodes:                  make([]NodePlacementEligibility, 0, len(inventory.Nodes)),
 	}
 	reservedByNode := reservedResourcesByNode(inventory.Tasks)
+	activeServiceTasksByNode := activeTasksByNode(inventory.Tasks, service.ID)
 	for _, node := range inventory.Nodes {
 		reserved := reservedByNode[node.ID]
 		available := availableResources(node.Resources, reserved)
+		activeServiceTasks := activeServiceTasksByNode[node.ID]
 		result := NodePlacementEligibility{
-			ID:       node.ID,
-			Hostname: node.Hostname,
-			Blockers: []PlacementBlocker{},
+			ID:                 node.ID,
+			Hostname:           node.Hostname,
+			Blockers:           []PlacementBlocker{},
+			ActiveServiceTasks: activeServiceTasks,
 			Resources: NodeResources{
 				Capacity:  node.Resources,
 				Reserved:  reserved,
@@ -307,6 +314,16 @@ func assessNodePlacement(inventory Result, service Service) PlacementEligibility
 				Message: fmt.Sprintf("requires %s memory, %s available", formatMemory(service.Reservations.MemoryBytes), formatMemory(available.MemoryBytes)),
 			})
 		}
+		if service.MaxReplicasPerNode > 0 && activeServiceTasks >= service.MaxReplicasPerNode {
+			taskWord := "tasks"
+			if activeServiceTasks == 1 {
+				taskWord = "task"
+			}
+			result.Blockers = append(result.Blockers, PlacementBlocker{
+				Code:    "max_replicas_per_node",
+				Message: fmt.Sprintf("service already has %d active %s, limit is %d", activeServiceTasks, taskWord, service.MaxReplicasPerNode),
+			})
+		}
 		result.PassesEvaluatedChecks = len(result.Blockers) == 0
 		eligibility.Nodes = append(eligibility.Nodes, result)
 	}
@@ -317,6 +334,17 @@ func assessNodePlacement(inventory Result, service Service) PlacementEligibility
 		return eligibility.Nodes[a].ID < eligibility.Nodes[b].ID
 	})
 	return eligibility
+}
+
+func activeTasksByNode(tasks []Task, serviceID string) map[string]uint64 {
+	active := make(map[string]uint64)
+	for _, task := range tasks {
+		if task.ServiceID != serviceID || task.NodeID == "" || terminalTaskState(task.State) {
+			continue
+		}
+		active[task.NodeID]++
+	}
+	return active
 }
 
 func reservedResourcesByNode(tasks []Task) map[string]Resources {
