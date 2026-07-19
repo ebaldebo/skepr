@@ -255,6 +255,103 @@ func TestNodeDrainUpdateFailureRequiresRecovery(t *testing.T) {
 	assert.Contains(t, stderr.String(), "RECOVERY: node worker-1 may remain drained; inspect live state before activating it")
 }
 
+func TestNodeActivateActivatesAndVerifiesClusterHealth(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	drained := healthyNodeDrainInventory()
+	drained.Nodes[1].Availability = "drain"
+	drained.DesiredTasks = nil
+	drained.Tasks = nil
+	active := drained
+	active.Nodes = append([]status.Node(nil), drained.Nodes...)
+	active.Nodes[1].Availability = "active"
+	connection := &nodeDrainConnection{inventories: []status.Result{drained, drained, active}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"node", "activate", "worker-1", "--timeout", "1s"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, []nodeAvailabilityUpdate{{nodeID: "w1", availability: "active"}}, connection.updates)
+	assert.Equal(t, 3, connection.inspectCalls)
+	assert.Equal(t, `ACTIVE: worker-1
+Target: worker-1 (w1)
+Availability: active
+Healthy managers: 1/1
+Converged services: 1/1
+`, stdout.String())
+}
+
+func TestNodeActivateJSONOutput(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	drained := healthyNodeDrainInventory()
+	drained.Nodes[1].Availability = "drain"
+	drained.DesiredTasks = nil
+	drained.Tasks = nil
+	active := drained
+	active.Nodes = append([]status.Node(nil), drained.Nodes...)
+	active.Nodes[1].Availability = "active"
+	connection := &nodeDrainConnection{inventories: []status.Result{drained, drained, active}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"node", "activate", "worker-1", "--timeout", "1s", "--json"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.JSONEq(t, `{
+  "schema_version": 1,
+  "endpoint": "unix:///var/run/docker.sock",
+  "cluster_id": "cluster-1",
+  "target": {
+    "id": "w1",
+    "hostname": "worker-1",
+    "role": "worker",
+    "state": "ready",
+    "availability": "active"
+  },
+  "phase": "active",
+  "mutation_occurred": true,
+  "availability": "active",
+  "healthy_managers": 1,
+  "total_managers": 1,
+  "converged_services": 1,
+  "total_services": 1
+}`, stdout.String())
+}
+
+func TestNodeActivateRejectsNodeThatIsNotDrained(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	connection := &nodeDrainConnection{inventories: []status.Result{healthyNodeDrainInventory()}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"node", "activate", "worker-1", "--timeout", "1s"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Empty(t, connection.updates)
+	assert.Equal(t, `ACTIVATION BLOCKED: worker-1
+Target: worker-1 (worker, ready/active)
+
+Blockers:
+  target node worker-1 availability is active, expected drain
+`, stdout.String())
+}
+
+func TestNodeActivateUpdateFailureRequiresRecoveryWithoutRedraining(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	drained := healthyNodeDrainInventory()
+	drained.Nodes[1].Availability = "drain"
+	drained.DesiredTasks = nil
+	drained.Tasks = nil
+	connection := &nodeDrainConnection{inventories: []status.Result{drained, drained}, updateErr: fmt.Errorf("manager lost the update response")}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Run(context.Background(), []string{"node", "activate", "worker-1", "--timeout", "1s"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitPartialMutation, exitCode)
+	assert.Empty(t, stdout.String())
+	assert.Equal(t, []nodeAvailabilityUpdate{{nodeID: "w1", availability: "active"}}, connection.updates)
+	assert.Contains(t, stderr.String(), "node activation failed: request activation for target node worker-1: manager lost the update response")
+	assert.Contains(t, stderr.String(), "RECOVERY: node worker-1 may be active; inspect live state before making another availability change")
+}
+
 type nodeDrainConnection struct {
 	inventories  []status.Result
 	inspectCalls int

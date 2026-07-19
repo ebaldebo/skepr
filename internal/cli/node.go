@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ebaldebo/skepr/internal/activate"
 	"github.com/ebaldebo/skepr/internal/drain"
 	"github.com/ebaldebo/skepr/internal/operations"
 	"github.com/ebaldebo/skepr/internal/preflight"
@@ -17,11 +18,19 @@ import (
 )
 
 func runNode(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "drain" {
-		report(stderr, "usage: skepr [--context name] node drain <node> [--dry-run] [--timeout duration] [--json]\n")
+	if len(args) == 0 {
+		report(stderr, "usage: skepr [--context name] node <command>\n")
 		return ExitInvalidUsage
 	}
-	return runNodeDrain(ctx, args[1:], contextName, connector, stdout, stderr)
+	switch args[0] {
+	case "drain":
+		return runNodeDrain(ctx, args[1:], contextName, connector, stdout, stderr)
+	case "activate":
+		return runNodeActivate(ctx, args[1:], contextName, connector, stdout, stderr)
+	default:
+		report(stderr, "usage: skepr [--context name] node <command>\n")
+		return ExitInvalidUsage
+	}
 }
 
 func runNodeDrain(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
@@ -88,6 +97,53 @@ func runNodeDrain(ctx context.Context, args []string, contextName string, connec
 	return ExitSuccess
 }
 
+func runNodeActivate(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("node activate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "emit JSON output")
+	timeout := flags.Duration("timeout", 5*time.Minute, "node activation timeout")
+	if err := flags.Parse(normalizeNodeActivateArgs(args)); err != nil || flags.NArg() != 1 || *timeout <= 0 {
+		if err == nil {
+			report(stderr, "usage: skepr [--context name] node activate <node> [--timeout duration] [--json]\n")
+		}
+		return ExitInvalidUsage
+	}
+
+	connection, err := connector.Connect(ctx, contextName)
+	if err != nil {
+		report(stderr, "configure Docker connection: %v\n", err)
+		return ExitDockerConnection
+	}
+	defer func() { _ = connection.Close() }()
+	maintenanceConnection, ok := connection.(status.MaintenanceConnection)
+	if !ok {
+		report(stderr, "Docker connection does not support Swarm node updates\n")
+		return ExitDockerConnection
+	}
+	stateDir, err := operations.DefaultStateDir()
+	if err != nil {
+		report(stderr, "configure node activation state: %v\n", err)
+		return ExitInvalidUsage
+	}
+	activator := activate.Activator{
+		Client:  maintenanceConnection,
+		Guard:   nodeDrainGuard{store: operations.NewStore(stateDir)},
+		Timeout: *timeout,
+		Progress: func(result activate.Result) {
+			_, _ = fmt.Fprintf(stderr, "node activate %s: %s\n", result.Target.Hostname, result.Phase)
+		},
+	}
+	result, err := activator.Activate(ctx, flags.Arg(0))
+	if err != nil {
+		return reportNodeActivateError(err, *jsonOutput, stdout, stderr)
+	}
+	if err := writeNodeJSONOrHuman(*jsonOutput, stdout, result, writeNodeActivateResult); err != nil {
+		report(stderr, "write node activation output: %v\n", err)
+		return ExitDockerConnection
+	}
+	return ExitSuccess
+}
+
 type nodeDrainGuard struct {
 	store *operations.Store
 }
@@ -110,6 +166,30 @@ func normalizeNodeDrainArgs(args []string) []string {
 	for index := 0; index < len(args); index++ {
 		switch arg := args[index]; arg {
 		case "--dry-run", "--json":
+			flagArgs = append(flagArgs, arg)
+		case "--timeout":
+			flagArgs = append(flagArgs, arg)
+			if index+1 < len(args) {
+				index++
+				flagArgs = append(flagArgs, args[index])
+			}
+		default:
+			if strings.HasPrefix(arg, "--timeout=") {
+				flagArgs = append(flagArgs, arg)
+			} else {
+				positional = append(positional, arg)
+			}
+		}
+	}
+	return append(flagArgs, positional...)
+}
+
+func normalizeNodeActivateArgs(args []string) []string {
+	flagArgs := make([]string, 0, len(args))
+	positional := make([]string, 0, 1)
+	for index := 0; index < len(args); index++ {
+		switch arg := args[index]; arg {
+		case "--json":
 			flagArgs = append(flagArgs, arg)
 		case "--timeout":
 			flagArgs = append(flagArgs, arg)
@@ -156,6 +236,34 @@ func reportNodeDrainError(err error, jsonOutput bool, stdout, stderr io.Writer) 
 	return ExitDockerConnection
 }
 
+func reportNodeActivateError(err error, jsonOutput bool, stdout, stderr io.Writer) int {
+	var safetyError *activate.SafetyError
+	if errors.As(err, &safetyError) {
+		if outputErr := writeNodeJSONOrHuman(jsonOutput, stdout, safetyError.Report, writeNodeActivateSafety); outputErr != nil {
+			report(stderr, "write node activation safety output: %v\n", outputErr)
+			return ExitDockerConnection
+		}
+		return ExitSafetyGate
+	}
+	var validationError *activate.ValidationError
+	if errors.As(err, &validationError) {
+		report(stderr, "node activation blocked: %v\n", validationError)
+		return ExitSafetyGate
+	}
+	var mutationError *activate.MutationError
+	if errors.As(err, &mutationError) {
+		report(stderr, "node activation failed: %v\n", mutationError.Err)
+		report(stderr, "RECOVERY: node %s may be active; inspect live state before making another availability change\n", mutationError.Result.Target.Hostname)
+		return ExitPartialMutation
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		report(stderr, "node activation stopped before mutation: %v\n", err)
+		return ExitTimeout
+	}
+	report(stderr, "node activation failed before mutation: %v\n", err)
+	return ExitDockerConnection
+}
+
 func writeNodeJSONOrHuman[T any](jsonOutput bool, writer io.Writer, result T, writeHuman func(io.Writer, T) error) error {
 	if !jsonOutput {
 		return writeHuman(writer, result)
@@ -178,6 +286,42 @@ func writeNodeDrainResult(writer io.Writer, result drain.Result) error {
 		result.GlobalTasksStopped,
 		len(result.AffectedServices),
 	)
+	return err
+}
+
+func writeNodeActivateResult(writer io.Writer, result activate.Result) error {
+	_, err := fmt.Fprintf(
+		writer,
+		"ACTIVE: %s\nTarget: %s (%s)\nAvailability: %s\nHealthy managers: %d/%d\nConverged services: %d/%d\n",
+		result.Target.Hostname,
+		result.Target.Hostname,
+		result.Target.ID,
+		result.Availability,
+		result.HealthyManagers,
+		result.TotalManagers,
+		result.ConvergedServices,
+		result.TotalServices,
+	)
+	return err
+}
+
+func writeNodeActivateSafety(writer io.Writer, report activate.SafetyReport) error {
+	targetName := report.RequestedNode
+	if report.Target != nil {
+		targetName = report.Target.Hostname
+	}
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "ACTIVATION BLOCKED: %s\n", targetName)
+	if report.Target == nil {
+		output.WriteString("Target: not found\n")
+	} else {
+		_, _ = fmt.Fprintf(&output, "Target: %s (%s, %s/%s)\n", report.Target.Hostname, report.Target.Role, report.Target.State, report.Target.Availability)
+	}
+	output.WriteString("\nBlockers:\n")
+	if !writeFindingLevel(&output, report.Findings, preflight.LevelBlocker, "  ") {
+		output.WriteString("  none\n")
+	}
+	_, err := io.WriteString(writer, output.String())
 	return err
 }
 

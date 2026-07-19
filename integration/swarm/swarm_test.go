@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ebaldebo/skepr/internal/activate"
 	"github.com/ebaldebo/skepr/internal/cli"
 	skeprdocker "github.com/ebaldebo/skepr/internal/docker"
 	"github.com/ebaldebo/skepr/internal/drain"
@@ -108,12 +109,18 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.True(t, drainResult.Evacuated)
 	assert.True(t, drainResult.ServicesConverged)
 
-	restoreConnection, err := connector.Connect(context.Background(), "")
-	require.NoError(t, err)
-	restoreClient, ok := restoreConnection.(status.MaintenanceConnection)
-	require.True(t, ok)
-	require.NoError(t, restoreClient.UpdateNodeAvailability(context.Background(), drainResult.Target.ID, "active"))
-	require.NoError(t, restoreConnection.Close())
+	var activateOutput bytes.Buffer
+	var activateErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"node", "activate", "worker-1", "--timeout", "30s", "--json"}, connector, &activateOutput, &activateErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, activateErrors.String())
+	var activateResult activate.Result
+	require.NoError(t, json.Unmarshal(activateOutput.Bytes(), &activateResult))
+	assert.Equal(t, activate.ResultSchemaVersion, activateResult.SchemaVersion)
+	assert.Equal(t, activate.PhaseActive, activateResult.Phase)
+	assert.Equal(t, "worker-1", activateResult.Target.Hostname)
+	assert.Equal(t, "active", activateResult.Availability)
+	assert.Equal(t, activateResult.TotalManagers, activateResult.HealthyManagers)
+	assert.Equal(t, activateResult.TotalServices, activateResult.ConvergedServices)
 
 	var beginOutput bytes.Buffer
 	var beginErrors bytes.Buffer
