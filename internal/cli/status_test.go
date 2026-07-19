@@ -294,8 +294,9 @@ Placement eligibility:
   worker-1   passes evaluated checks
 Evaluated constraints: none
 Required platforms: any
+Required resources: none
 Unevaluated constraints: none
-Other inputs not evaluated: resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -307,7 +308,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
 
 	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.JSONEq(t, `{
-  "schema_version": 4,
+  "schema_version": 5,
   "health": "degraded",
   "service": {
     "id": "s2",
@@ -344,10 +345,11 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
       "node_readiness",
       "node_availability",
       "placement_constraints",
-      "platform_requirements"
+      "platform_requirements",
+      "cpu_memory_reservations"
     ],
     "unevaluated_inputs": [
-      "resource_reservations",
+      "generic_resources",
       "maximum_replicas_per_node",
       "host_published_port_conflicts",
       "storage_portability"
@@ -355,6 +357,10 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
     "evaluated_constraints": [],
     "unevaluated_constraints": [],
     "required_platforms": [],
+    "required_resources": {
+      "nano_cpus": 0,
+      "memory_bytes": 0
+    },
     "nodes": [
       {
         "id": "m1",
@@ -402,8 +408,9 @@ Placement eligibility:
   worker-1   passes evaluated checks
 Evaluated constraints: none
 Required platforms: any
+Required resources: none
 Unevaluated constraints: none
-Other inputs not evaluated: resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -438,8 +445,9 @@ Placement eligibility:
   worker-2   blocked: availability is drain
 Evaluated constraints: none
 Required platforms: any
+Required resources: none
 Unevaluated constraints: none
-Other inputs not evaluated: resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, replica limits, ports, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -489,8 +497,9 @@ Placement eligibility:
   worker-west       blocked: constraint node.labels.region==east does not match
 Evaluated constraints: node.labels.region==east
 Required platforms: any
+Required resources: none
 Unevaluated constraints: engine.labels.storage==ssd
-Other inputs not evaluated: resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -563,8 +572,9 @@ Placement eligibility:
   mac        blocked: platform darwin/amd64 does not match required linux/amd64
 Evaluated constraints: none
 Required platforms: linux/amd64
+Required resources: none
 Unevaluated constraints: none
-Other inputs not evaluated: resources, replica limits, ports, storage
+Other inputs not evaluated: generic resources, replica limits, ports, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -579,6 +589,90 @@ Other inputs not evaluated: resources, replica limits, ports, storage
 		Message: "platform linux/arm64 does not match required linux/amd64",
 	}}, diagnosis.PlacementEligibility.Nodes[0].Blockers)
 	assert.True(t, diagnosis.PlacementEligibility.Nodes[1].PassesEvaluatedChecks)
+}
+
+func TestServiceDiagnoseReportsCPUAndMemoryEligibility(t *testing.T) {
+	t.Parallel()
+
+	gibibyte := int64(1 << 30)
+	connector := &fakeConnector{connection: resultInspector{result: status.Result{
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "worker-free", State: "ready", Availability: "active", Resources: status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 4 * gibibyte}},
+			{ID: "w2", Hostname: "worker-used", State: "ready", Availability: "active", Resources: status.Resources{NanoCPUs: 4_000_000_000, MemoryBytes: 8 * gibibyte}},
+			{ID: "w3", Hostname: "worker-small", State: "ready", Availability: "active", Resources: status.Resources{NanoCPUs: 1_000_000_000, MemoryBytes: gibibyte}},
+		},
+		Services: []status.Service{
+			{ID: "s1", Name: "database", Mode: "replicated", DesiredTasks: 1, Reservations: status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 2 * gibibyte}},
+		},
+		Tasks: []status.Task{
+			{ID: "t1", NodeID: "w2", State: "running", Reservations: status.Resources{NanoCPUs: 3_000_000_000, MemoryBytes: 7 * gibibyte}},
+		},
+	}}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "database"}, connector, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED service database
+Mode: replicated
+Tasks: 0/1 running
+
+Current failures: none
+
+Recent terminal tasks: none
+
+Placement eligibility:
+  worker-free   passes evaluated checks
+  worker-small  blocked: requires 2 CPUs, 1 CPU available; requires 2 GiB memory, 1 GiB available
+  worker-used   blocked: requires 2 CPUs, 1 CPU available; requires 2 GiB memory, 1 GiB available
+Evaluated constraints: none
+Required platforms: any
+Required resources: 2 CPUs, 2 GiB memory
+Unevaluated constraints: none
+Other inputs not evaluated: generic resources, replica limits, ports, storage
+`, stdout.String())
+
+	stdout.Reset()
+	exitCode = Run(context.Background(), []string{"service", "diagnose", "database", "--json"}, connector, &stdout, &bytes.Buffer{})
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	var diagnosis status.ServiceDiagnosis
+	assert.NoError(t, json.Unmarshal(stdout.Bytes(), &diagnosis))
+	assert.Equal(t, status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 2 * gibibyte}, diagnosis.PlacementEligibility.RequiredResources)
+	assert.Equal(t, status.NodeResources{
+		Capacity:  status.Resources{NanoCPUs: 4_000_000_000, MemoryBytes: 8 * gibibyte},
+		Reserved:  status.Resources{NanoCPUs: 3_000_000_000, MemoryBytes: 7 * gibibyte},
+		Available: status.Resources{NanoCPUs: 1_000_000_000, MemoryBytes: gibibyte},
+	}, diagnosis.PlacementEligibility.Nodes[2].Resources)
+	assert.Equal(t, []string{"insufficient_cpu", "insufficient_memory"}, []string{
+		diagnosis.PlacementEligibility.Nodes[2].Blockers[0].Code,
+		diagnosis.PlacementEligibility.Nodes[2].Blockers[1].Code,
+	})
+}
+
+func TestServiceDiagnosisCountsActiveAssignedTaskReservations(t *testing.T) {
+	tests := []struct {
+		name         string
+		task         status.Task
+		wantReserved status.Resources
+	}{
+		{name: "running assigned task", task: status.Task{NodeID: "w1", State: "running", Reservations: status.Resources{NanoCPUs: 1_000_000_000}}, wantReserved: status.Resources{NanoCPUs: 1_000_000_000}},
+		{name: "preparing assigned task", task: status.Task{NodeID: "w1", State: "preparing", Reservations: status.Resources{MemoryBytes: 1 << 30}}, wantReserved: status.Resources{MemoryBytes: 1 << 30}},
+		{name: "failed task", task: status.Task{NodeID: "w1", State: "failed", Reservations: status.Resources{NanoCPUs: 1_000_000_000}}},
+		{name: "unassigned task", task: status.Task{State: "running", Reservations: status.Resources{NanoCPUs: 1_000_000_000}}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			diagnosis, found := status.DiagnoseService(status.Result{
+				Nodes:    []status.Node{{ID: "w1", State: "ready", Availability: "active", Resources: status.Resources{NanoCPUs: 4_000_000_000, MemoryBytes: 4 << 30}}},
+				Services: []status.Service{{ID: "s1", Converged: true}},
+				Tasks:    []status.Task{test.task},
+			}, "s1")
+
+			require.True(t, found)
+			require.Len(t, diagnosis.PlacementEligibility.Nodes, 1)
+			assert.Equal(t, test.wantReserved, diagnosis.PlacementEligibility.Nodes[0].Resources.Reserved)
+		})
+	}
 }
 
 func TestAssessHealthEvaluatesNodeAndManagerHealth(t *testing.T) {

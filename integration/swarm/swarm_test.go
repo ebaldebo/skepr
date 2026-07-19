@@ -144,6 +144,9 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 		Annotations: swarm.Annotations{Name: "skepr-stalled-singleton"},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: &swarm.ContainerSpec{Image: "alpine:3.20"},
+			Resources: &swarm.ResourceRequirements{
+				Reservations: &swarm.Resources{MemoryBytes: 1 << 60},
+			},
 			Placement: &swarm.Placement{
 				Constraints: []string{"node.hostname==missing-node"},
 				Platforms:   []swarm.Platform{{OS: "windows"}},
@@ -184,12 +187,13 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, uint64(0), diagnosis.Service.RunningTasks)
 	assert.Equal(t, uint64(1), diagnosis.Service.DesiredTasks)
 	assert.Empty(t, diagnosis.CurrentFailures)
-	assert.Equal(t, []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements"}, diagnosis.PlacementEligibility.EvaluatedInputs)
+	assert.Equal(t, []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations"}, diagnosis.PlacementEligibility.EvaluatedInputs)
 	assert.Equal(t, []string{"node.hostname==missing-node"}, diagnosis.PlacementEligibility.EvaluatedConstraints)
 	assert.Equal(t, []status.Platform{{OS: "windows"}}, diagnosis.PlacementEligibility.RequiredPlatforms)
+	assert.Equal(t, status.Resources{MemoryBytes: 1 << 60}, diagnosis.PlacementEligibility.RequiredResources)
 	require.Len(t, diagnosis.PlacementEligibility.Nodes, 5)
 	for _, node := range diagnosis.PlacementEligibility.Nodes {
-		wantCodes := []string{"constraint_mismatch", "platform_mismatch"}
+		wantCodes := []string{"constraint_mismatch", "platform_mismatch", "insufficient_memory"}
 		if node.Hostname == "worker-2" {
 			wantCodes = append([]string{"node_not_active"}, wantCodes...)
 		}
@@ -198,7 +202,9 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 		for index, code := range wantCodes {
 			assert.Equal(t, code, node.Blockers[index].Code, node.Hostname)
 		}
-		assert.Contains(t, node.Blockers[len(node.Blockers)-1].Message, "does not match required windows", node.Hostname)
+		assert.Contains(t, node.Blockers[len(node.Blockers)-2].Message, "does not match required windows", node.Hostname)
+		assert.Positive(t, node.Resources.Capacity.MemoryBytes, node.Hostname)
+		assert.LessOrEqual(t, node.Resources.Available.MemoryBytes, node.Resources.Capacity.MemoryBytes, node.Hostname)
 	}
 
 	operation.Phase = maintenance.PhaseWaitingServices

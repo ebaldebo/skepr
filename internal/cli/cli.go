@@ -142,12 +142,17 @@ func runServiceDiagnose(ctx context.Context, args []string, contextName string, 
 		}
 		_, _ = fmt.Fprintf(&output, "Required platforms: %s\n", strings.Join(platforms, ", "))
 	}
+	if diagnosis.PlacementEligibility.RequiredResources == (status.Resources{}) {
+		output.WriteString("Required resources: none\n")
+	} else {
+		_, _ = fmt.Fprintf(&output, "Required resources: %s\n", diagnosis.PlacementEligibility.RequiredResources)
+	}
 	if len(diagnosis.PlacementEligibility.UnevaluatedConstraints) == 0 {
 		output.WriteString("Unevaluated constraints: none\n")
 	} else {
 		_, _ = fmt.Fprintf(&output, "Unevaluated constraints: %s\n", strings.Join(diagnosis.PlacementEligibility.UnevaluatedConstraints, ", "))
 	}
-	output.WriteString("Other inputs not evaluated: resources, replica limits, ports, storage\n")
+	output.WriteString("Other inputs not evaluated: generic resources, replica limits, ports, storage\n")
 	if _, err := io.WriteString(stdout, output.String()); err != nil {
 		report(stderr, "write service diagnosis output: %v\n", err)
 		return ExitDockerConnection

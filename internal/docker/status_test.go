@@ -27,10 +27,14 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 		}},
 		nodes: []swarm.Node{
 			{
-				ID:          "w1",
-				Spec:        swarm.NodeSpec{Annotations: swarm.Annotations{Labels: map[string]string{"region": "east"}}, Role: swarm.NodeRoleWorker, Availability: swarm.NodeAvailabilityActive},
-				Description: swarm.NodeDescription{Hostname: "worker-1", Platform: swarm.Platform{OS: "linux", Architecture: "x86_64"}},
-				Status:      swarm.NodeStatus{State: swarm.NodeStateReady},
+				ID:   "w1",
+				Spec: swarm.NodeSpec{Annotations: swarm.Annotations{Labels: map[string]string{"region": "east"}}, Role: swarm.NodeRoleWorker, Availability: swarm.NodeAvailabilityActive},
+				Description: swarm.NodeDescription{
+					Hostname:  "worker-1",
+					Platform:  swarm.Platform{OS: "linux", Architecture: "x86_64"},
+					Resources: swarm.Resources{NanoCPUs: 4_000_000_000, MemoryBytes: 8 << 30},
+				},
+				Status: swarm.NodeStatus{State: swarm.NodeStateReady},
 			},
 			{
 				ID:            "m2",
@@ -72,13 +76,13 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 					TaskTemplate: swarm.TaskSpec{ForceUpdate: 7, Placement: &swarm.Placement{
 						Constraints: []string{"node.labels.region==east"},
 						Platforms:   []swarm.Platform{{OS: "linux", Architecture: "amd64"}},
-					}},
+					}, Resources: &swarm.ResourceRequirements{Reservations: &swarm.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 2 << 30}}},
 				},
 				ServiceStatus: &swarm.ServiceStatus{RunningTasks: 0, DesiredTasks: 1},
 			},
 		},
 		tasks: []swarm.Task{
-			{ID: "healthy", ServiceID: "s1", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateRunning}},
+			{ID: "healthy", ServiceID: "s1", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateRunning}, Spec: swarm.TaskSpec{Resources: &swarm.ResourceRequirements{Reservations: &swarm.Resources{NanoCPUs: 500_000_000, MemoryBytes: 256 << 20}}}},
 			{ID: "starting", ServiceID: "s1", Slot: 2, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateStarting}},
 			{ID: "rejected", ServiceID: "s2", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateRejected, Err: "no suitable node"}},
 			{ID: "failed", ServiceID: "s1", Slot: 2, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "exit code 1"}},
@@ -102,10 +106,10 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 		Nodes: []status.Node{
 			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
 			{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
-			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active", Labels: map[string]string{"region": "east"}, Platform: status.Platform{OS: "linux", Architecture: "x86_64"}},
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active", Labels: map[string]string{"region": "east"}, Platform: status.Platform{OS: "linux", Architecture: "x86_64"}, Resources: status.Resources{NanoCPUs: 4_000_000_000, MemoryBytes: 8 << 30}},
 		},
 		Services: []status.Service{
-			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false, ForceUpdate: 7, PlacementConstraints: []string{"node.labels.region==east"}, RequiredPlatforms: []status.Platform{{OS: "linux", Architecture: "amd64"}}},
+			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false, ForceUpdate: 7, PlacementConstraints: []string{"node.labels.region==east"}, RequiredPlatforms: []status.Platform{{OS: "linux", Architecture: "amd64"}}, Reservations: status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 2 << 30}},
 			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 3, DesiredTasks: 3, Converged: true},
 			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
 		},
@@ -116,14 +120,14 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 		},
 		DesiredTasks: []status.Task{
 			{ID: "orphaned", Name: "agent.manager-2", ServiceID: "s3", Service: "agent", NodeID: "m2", Node: "manager-2", DesiredState: "running", State: "orphaned"},
-			{ID: "healthy", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+			{ID: "healthy", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running", Reservations: status.Resources{NanoCPUs: 500_000_000, MemoryBytes: 256 << 20}},
 			{ID: "failed", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "failed", Error: "exit code 1"},
 			{ID: "starting", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "starting"},
 			{ID: "rejected", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
 		},
 		Tasks: []status.Task{
 			{ID: "orphaned", Name: "agent.manager-2", ServiceID: "s3", Service: "agent", NodeID: "m2", Node: "manager-2", DesiredState: "running", State: "orphaned"},
-			{ID: "healthy", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+			{ID: "healthy", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running", Reservations: status.Resources{NanoCPUs: 500_000_000, MemoryBytes: 256 << 20}},
 			{ID: "failed", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "failed", Error: "exit code 1"},
 			{ID: "starting", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "starting"},
 			{ID: "historical", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "shutdown", State: "failed", Error: "old failure", UpdatedAt: historicalAt},

@@ -93,6 +93,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 				OS:           node.Description.Platform.OS,
 				Architecture: node.Description.Platform.Architecture,
 			},
+			Resources: normalizeResources(&node.Description.Resources),
 		})
 	}
 	sort.Slice(result.Nodes, func(a, b int) bool {
@@ -132,6 +133,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			ForceUpdate:          service.Spec.TaskTemplate.ForceUpdate,
 			PlacementConstraints: placementConstraints(service.Spec.TaskTemplate.Placement),
 			RequiredPlatforms:    requiredPlatforms(service.Spec.TaskTemplate.Placement),
+			Reservations:         resourceReservations(service.Spec.TaskTemplate.Resources),
 		})
 	}
 	sort.Slice(result.Services, func(a, b int) bool {
@@ -172,6 +174,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			State:        string(task.Status.State),
 			Error:        task.Status.Err,
 			UpdatedAt:    task.UpdatedAt,
+			Reservations: resourceReservations(task.Spec.Resources),
 		}
 		result.Tasks = append(result.Tasks, normalizedTask)
 		if task.DesiredState != swarm.TaskStateRunning {
@@ -219,6 +222,20 @@ func requiredPlatforms(placement *swarm.Placement) []status.Platform {
 		platforms = append(platforms, status.Platform{OS: platform.OS, Architecture: platform.Architecture})
 	}
 	return platforms
+}
+
+func resourceReservations(requirements *swarm.ResourceRequirements) status.Resources {
+	if requirements == nil {
+		return status.Resources{}
+	}
+	return normalizeResources(requirements.Reservations)
+}
+
+func normalizeResources(resources *swarm.Resources) status.Resources {
+	if resources == nil {
+		return status.Resources{}
+	}
+	return status.Resources{NanoCPUs: resources.NanoCPUs, MemoryBytes: resources.MemoryBytes}
 }
 
 func unhealthyTaskState(state swarm.TaskState) bool {

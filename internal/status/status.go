@@ -11,7 +11,26 @@ import (
 
 const SchemaVersion = 1
 const HealthSchemaVersion = 2
-const ServiceDiagnosisSchemaVersion = 4
+const ServiceDiagnosisSchemaVersion = 5
+
+type Resources struct {
+	NanoCPUs    int64 `json:"nano_cpus"`
+	MemoryBytes int64 `json:"memory_bytes"`
+}
+
+func (r Resources) String() string {
+	parts := make([]string, 0, 2)
+	if r.NanoCPUs > 0 {
+		parts = append(parts, formatCPUs(r.NanoCPUs))
+	}
+	if r.MemoryBytes > 0 {
+		parts = append(parts, formatMemory(r.MemoryBytes)+" memory")
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
+}
 
 type Platform struct {
 	OS           string `json:"os"`
@@ -46,6 +65,7 @@ type Node struct {
 	ManagerStatus string            `json:"manager_status,omitempty"`
 	Labels        map[string]string `json:"-"`
 	Platform      Platform          `json:"-"`
+	Resources     Resources         `json:"-"`
 }
 
 type Service struct {
@@ -58,6 +78,7 @@ type Service struct {
 	ForceUpdate          uint64     `json:"-"`
 	PlacementConstraints []string   `json:"-"`
 	RequiredPlatforms    []Platform `json:"-"`
+	Reservations         Resources  `json:"-"`
 }
 
 type Task struct {
@@ -71,6 +92,7 @@ type Task struct {
 	State        string    `json:"state"`
 	Error        string    `json:"error,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at,omitzero"`
+	Reservations Resources `json:"-"`
 }
 
 type Result struct {
@@ -141,6 +163,7 @@ type PlacementEligibility struct {
 	EvaluatedConstraints   []string                   `json:"evaluated_constraints"`
 	UnevaluatedConstraints []string                   `json:"unevaluated_constraints"`
 	RequiredPlatforms      []Platform                 `json:"required_platforms"`
+	RequiredResources      Resources                  `json:"required_resources"`
 	Nodes                  []NodePlacementEligibility `json:"nodes"`
 }
 
@@ -149,6 +172,13 @@ type NodePlacementEligibility struct {
 	Hostname              string             `json:"hostname"`
 	PassesEvaluatedChecks bool               `json:"passes_evaluated_checks"`
 	Blockers              []PlacementBlocker `json:"blockers"`
+	Resources             NodeResources      `json:"resources,omitzero"`
+}
+
+type NodeResources struct {
+	Capacity  Resources `json:"capacity"`
+	Reserved  Resources `json:"reserved"`
+	Available Resources `json:"available"`
 }
 
 type PlacementBlocker struct {
@@ -167,7 +197,7 @@ func DiagnoseService(result Result, requested string) (ServiceDiagnosis, bool) {
 		Service:              service,
 		CurrentFailures:      []Task{},
 		RecentTerminalTasks:  []Task{},
-		PlacementEligibility: assessNodePlacement(result.Nodes, service.PlacementConstraints, service.RequiredPlatforms),
+		PlacementEligibility: assessNodePlacement(result, service),
 	}
 	for _, task := range result.UnhealthyTasks {
 		if task.ServiceID == service.ID {
@@ -206,25 +236,34 @@ type placementConstraint struct {
 	operator string
 }
 
-func assessNodePlacement(nodes []Node, constraints []string, requiredPlatforms []Platform) PlacementEligibility {
-	supportedConstraints, unevaluatedConstraints := parsePlacementConstraints(constraints)
+func assessNodePlacement(inventory Result, service Service) PlacementEligibility {
+	supportedConstraints, unevaluatedConstraints := parsePlacementConstraints(service.PlacementConstraints)
 	evaluatedConstraints := make([]string, 0, len(supportedConstraints))
 	for _, constraint := range supportedConstraints {
 		evaluatedConstraints = append(evaluatedConstraints, constraint.raw)
 	}
 	eligibility := PlacementEligibility{
-		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements"},
-		UnevaluatedInputs:      []string{"resource_reservations", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability"},
+		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations"},
+		UnevaluatedInputs:      []string{"generic_resources", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability"},
 		EvaluatedConstraints:   evaluatedConstraints,
 		UnevaluatedConstraints: unevaluatedConstraints,
-		RequiredPlatforms:      append([]Platform{}, requiredPlatforms...),
-		Nodes:                  make([]NodePlacementEligibility, 0, len(nodes)),
+		RequiredPlatforms:      append([]Platform{}, service.RequiredPlatforms...),
+		RequiredResources:      service.Reservations,
+		Nodes:                  make([]NodePlacementEligibility, 0, len(inventory.Nodes)),
 	}
-	for _, node := range nodes {
+	reservedByNode := reservedResourcesByNode(inventory.Tasks)
+	for _, node := range inventory.Nodes {
+		reserved := reservedByNode[node.ID]
+		available := availableResources(node.Resources, reserved)
 		result := NodePlacementEligibility{
 			ID:       node.ID,
 			Hostname: node.Hostname,
 			Blockers: []PlacementBlocker{},
+			Resources: NodeResources{
+				Capacity:  node.Resources,
+				Reserved:  reserved,
+				Available: available,
+			},
 		}
 		if node.State != "ready" {
 			result.Blockers = append(result.Blockers, PlacementBlocker{
@@ -246,14 +285,26 @@ func assessNodePlacement(nodes []Node, constraints []string, requiredPlatforms [
 				})
 			}
 		}
-		if len(requiredPlatforms) > 0 && !matchesRequiredPlatform(node.Platform, requiredPlatforms) {
-			platforms := make([]string, 0, len(requiredPlatforms))
-			for _, platform := range requiredPlatforms {
+		if len(service.RequiredPlatforms) > 0 && !matchesRequiredPlatform(node.Platform, service.RequiredPlatforms) {
+			platforms := make([]string, 0, len(service.RequiredPlatforms))
+			for _, platform := range service.RequiredPlatforms {
 				platforms = append(platforms, platform.String())
 			}
 			result.Blockers = append(result.Blockers, PlacementBlocker{
 				Code:    "platform_mismatch",
 				Message: fmt.Sprintf("platform %s does not match required %s", node.Platform, strings.Join(platforms, " or ")),
+			})
+		}
+		if service.Reservations.NanoCPUs > available.NanoCPUs {
+			result.Blockers = append(result.Blockers, PlacementBlocker{
+				Code:    "insufficient_cpu",
+				Message: fmt.Sprintf("requires %s, %s available", formatCPUs(service.Reservations.NanoCPUs), formatCPUs(available.NanoCPUs)),
+			})
+		}
+		if service.Reservations.MemoryBytes > available.MemoryBytes {
+			result.Blockers = append(result.Blockers, PlacementBlocker{
+				Code:    "insufficient_memory",
+				Message: fmt.Sprintf("requires %s memory, %s available", formatMemory(service.Reservations.MemoryBytes), formatMemory(available.MemoryBytes)),
 			})
 		}
 		result.PassesEvaluatedChecks = len(result.Blockers) == 0
@@ -266,6 +317,53 @@ func assessNodePlacement(nodes []Node, constraints []string, requiredPlatforms [
 		return eligibility.Nodes[a].ID < eligibility.Nodes[b].ID
 	})
 	return eligibility
+}
+
+func reservedResourcesByNode(tasks []Task) map[string]Resources {
+	reserved := make(map[string]Resources)
+	for _, task := range tasks {
+		if task.NodeID == "" || terminalTaskState(task.State) {
+			continue
+		}
+		resources := reserved[task.NodeID]
+		resources.NanoCPUs += task.Reservations.NanoCPUs
+		resources.MemoryBytes += task.Reservations.MemoryBytes
+		reserved[task.NodeID] = resources
+	}
+	return reserved
+}
+
+func availableResources(capacity, reserved Resources) Resources {
+	return Resources{
+		NanoCPUs:    max(capacity.NanoCPUs-reserved.NanoCPUs, 0),
+		MemoryBytes: max(capacity.MemoryBytes-reserved.MemoryBytes, 0),
+	}
+}
+
+func formatCPUs(nanoCPUs int64) string {
+	unit := "CPUs"
+	if nanoCPUs == 1_000_000_000 {
+		unit = "CPU"
+	}
+	return fmt.Sprintf("%.3g %s", float64(nanoCPUs)/1_000_000_000, unit)
+}
+
+func formatMemory(bytes int64) string {
+	const (
+		gibibyte = int64(1 << 30)
+		mebibyte = int64(1 << 20)
+		kibibyte = int64(1 << 10)
+	)
+	switch {
+	case bytes >= gibibyte:
+		return fmt.Sprintf("%.3g GiB", float64(bytes)/float64(gibibyte))
+	case bytes >= mebibyte:
+		return fmt.Sprintf("%.3g MiB", float64(bytes)/float64(mebibyte))
+	case bytes >= kibibyte:
+		return fmt.Sprintf("%.3g KiB", float64(bytes)/float64(kibibyte))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
 }
 
 func matchesRequiredPlatform(node Platform, required []Platform) bool {
