@@ -28,7 +28,7 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 		nodes: []swarm.Node{
 			{
 				ID:          "w1",
-				Spec:        swarm.NodeSpec{Role: swarm.NodeRoleWorker, Availability: swarm.NodeAvailabilityActive},
+				Spec:        swarm.NodeSpec{Annotations: swarm.Annotations{Labels: map[string]string{"region": "east"}}, Role: swarm.NodeRoleWorker, Availability: swarm.NodeAvailabilityActive},
 				Description: swarm.NodeDescription{Hostname: "worker-1"},
 				Status:      swarm.NodeStatus{State: swarm.NodeStateReady},
 			},
@@ -69,7 +69,7 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 				Spec: swarm.ServiceSpec{
 					Annotations:  swarm.Annotations{Name: "database"},
 					Mode:         swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: uint64Pointer(1)}},
-					TaskTemplate: swarm.TaskSpec{ForceUpdate: 7},
+					TaskTemplate: swarm.TaskSpec{ForceUpdate: 7, Placement: &swarm.Placement{Constraints: []string{"node.labels.region==east"}}},
 				},
 				ServiceStatus: &swarm.ServiceStatus{RunningTasks: 0, DesiredTasks: 1},
 			},
@@ -99,10 +99,10 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 		Nodes: []status.Node{
 			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
 			{ID: "m2", Hostname: "manager-2", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "reachable"},
-			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active", Labels: map[string]string{"region": "east"}},
 		},
 		Services: []status.Service{
-			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false, ForceUpdate: 7},
+			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false, ForceUpdate: 7, PlacementConstraints: []string{"node.labels.region==east"}},
 			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 3, DesiredTasks: 3, Converged: true},
 			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
 		},

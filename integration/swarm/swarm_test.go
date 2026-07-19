@@ -181,16 +181,16 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, uint64(0), diagnosis.Service.RunningTasks)
 	assert.Equal(t, uint64(1), diagnosis.Service.DesiredTasks)
 	assert.Empty(t, diagnosis.CurrentFailures)
-	assert.Equal(t, []string{"node_readiness", "node_availability"}, diagnosis.PlacementEligibility.EvaluatedInputs)
+	assert.Equal(t, []string{"node_readiness", "node_availability", "placement_constraints"}, diagnosis.PlacementEligibility.EvaluatedInputs)
+	assert.Equal(t, []string{"node.hostname==missing-node"}, diagnosis.PlacementEligibility.EvaluatedConstraints)
 	require.Len(t, diagnosis.PlacementEligibility.Nodes, 5)
 	for _, node := range diagnosis.PlacementEligibility.Nodes {
+		wantBlockers := []status.PlacementBlocker{{Code: "constraint_mismatch", Message: "constraint node.hostname==missing-node does not match"}}
 		if node.Hostname == "worker-2" {
-			assert.False(t, node.PassesEvaluatedChecks)
-			assert.Equal(t, []status.PlacementBlocker{{Code: "node_not_active", Message: "availability is drain"}}, node.Blockers)
-			continue
+			wantBlockers = append([]status.PlacementBlocker{{Code: "node_not_active", Message: "availability is drain"}}, wantBlockers...)
 		}
-		assert.True(t, node.PassesEvaluatedChecks, node.Hostname)
-		assert.Empty(t, node.Blockers, node.Hostname)
+		assert.False(t, node.PassesEvaluatedChecks, node.Hostname)
+		assert.Equal(t, wantBlockers, node.Blockers, node.Hostname)
 	}
 
 	operation.Phase = maintenance.PhaseWaitingServices

@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 
 	"github.com/ebaldebo/skepr/internal/status"
@@ -87,6 +88,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			State:         string(node.Status.State),
 			Availability:  string(node.Spec.Availability),
 			ManagerStatus: managerStatus,
+			Labels:        maps.Clone(node.Spec.Labels),
 		})
 	}
 	sort.Slice(result.Nodes, func(a, b int) bool {
@@ -117,13 +119,14 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 		serviceNames[service.ID] = service.Spec.Name
 		serviceModes[service.ID] = mode
 		result.Services = append(result.Services, status.Service{
-			ID:           service.ID,
-			Name:         service.Spec.Name,
-			Mode:         mode,
-			RunningTasks: service.ServiceStatus.RunningTasks,
-			DesiredTasks: service.ServiceStatus.DesiredTasks,
-			Converged:    service.ServiceStatus.RunningTasks == service.ServiceStatus.DesiredTasks,
-			ForceUpdate:  service.Spec.TaskTemplate.ForceUpdate,
+			ID:                   service.ID,
+			Name:                 service.Spec.Name,
+			Mode:                 mode,
+			RunningTasks:         service.ServiceStatus.RunningTasks,
+			DesiredTasks:         service.ServiceStatus.DesiredTasks,
+			Converged:            service.ServiceStatus.RunningTasks == service.ServiceStatus.DesiredTasks,
+			ForceUpdate:          service.Spec.TaskTemplate.ForceUpdate,
+			PlacementConstraints: placementConstraints(service.Spec.TaskTemplate.Placement),
 		})
 	}
 	sort.Slice(result.Services, func(a, b int) bool {
@@ -193,6 +196,13 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 		return result.Tasks[a].ID < result.Tasks[b].ID
 	})
 	return result, nil
+}
+
+func placementConstraints(placement *swarm.Placement) []string {
+	if placement == nil {
+		return nil
+	}
+	return append([]string(nil), placement.Constraints...)
 }
 
 func unhealthyTaskState(state swarm.TaskState) bool {

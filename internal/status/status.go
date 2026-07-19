@@ -11,7 +11,7 @@ import (
 
 const SchemaVersion = 1
 const HealthSchemaVersion = 2
-const ServiceDiagnosisSchemaVersion = 2
+const ServiceDiagnosisSchemaVersion = 3
 
 type Cluster struct {
 	ID               string `json:"id"`
@@ -20,22 +20,24 @@ type Cluster struct {
 }
 
 type Node struct {
-	ID            string `json:"id"`
-	Hostname      string `json:"hostname"`
-	Role          string `json:"role"`
-	State         string `json:"state"`
-	Availability  string `json:"availability"`
-	ManagerStatus string `json:"manager_status,omitempty"`
+	ID            string            `json:"id"`
+	Hostname      string            `json:"hostname"`
+	Role          string            `json:"role"`
+	State         string            `json:"state"`
+	Availability  string            `json:"availability"`
+	ManagerStatus string            `json:"manager_status,omitempty"`
+	Labels        map[string]string `json:"-"`
 }
 
 type Service struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Mode         string `json:"mode"`
-	RunningTasks uint64 `json:"running_tasks"`
-	DesiredTasks uint64 `json:"desired_tasks"`
-	Converged    bool   `json:"converged"`
-	ForceUpdate  uint64 `json:"-"`
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	Mode                 string   `json:"mode"`
+	RunningTasks         uint64   `json:"running_tasks"`
+	DesiredTasks         uint64   `json:"desired_tasks"`
+	Converged            bool     `json:"converged"`
+	ForceUpdate          uint64   `json:"-"`
+	PlacementConstraints []string `json:"-"`
 }
 
 type Task struct {
@@ -114,9 +116,11 @@ type ServiceDiagnosis struct {
 }
 
 type PlacementEligibility struct {
-	EvaluatedInputs   []string                   `json:"evaluated_inputs"`
-	UnevaluatedInputs []string                   `json:"unevaluated_inputs"`
-	Nodes             []NodePlacementEligibility `json:"nodes"`
+	EvaluatedInputs        []string                   `json:"evaluated_inputs"`
+	UnevaluatedInputs      []string                   `json:"unevaluated_inputs"`
+	EvaluatedConstraints   []string                   `json:"evaluated_constraints"`
+	UnevaluatedConstraints []string                   `json:"unevaluated_constraints"`
+	Nodes                  []NodePlacementEligibility `json:"nodes"`
 }
 
 type NodePlacementEligibility struct {
@@ -142,7 +146,7 @@ func DiagnoseService(result Result, requested string) (ServiceDiagnosis, bool) {
 		Service:              service,
 		CurrentFailures:      []Task{},
 		RecentTerminalTasks:  []Task{},
-		PlacementEligibility: assessNodePlacement(result.Nodes),
+		PlacementEligibility: assessNodePlacement(result.Nodes, service.PlacementConstraints),
 	}
 	for _, task := range result.UnhealthyTasks {
 		if task.ServiceID == service.ID {
@@ -174,11 +178,25 @@ func DiagnoseService(result Result, requested string) (ServiceDiagnosis, bool) {
 	return diagnosis, true
 }
 
-func assessNodePlacement(nodes []Node) PlacementEligibility {
+type placementConstraint struct {
+	raw      string
+	key      string
+	value    string
+	operator string
+}
+
+func assessNodePlacement(nodes []Node, constraints []string) PlacementEligibility {
+	supportedConstraints, unevaluatedConstraints := parsePlacementConstraints(constraints)
+	evaluatedConstraints := make([]string, 0, len(supportedConstraints))
+	for _, constraint := range supportedConstraints {
+		evaluatedConstraints = append(evaluatedConstraints, constraint.raw)
+	}
 	eligibility := PlacementEligibility{
-		EvaluatedInputs:   []string{"node_readiness", "node_availability"},
-		UnevaluatedInputs: []string{"placement_constraints", "platform_requirements", "resource_reservations", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability"},
-		Nodes:             make([]NodePlacementEligibility, 0, len(nodes)),
+		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints"},
+		UnevaluatedInputs:      []string{"platform_requirements", "resource_reservations", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability"},
+		EvaluatedConstraints:   evaluatedConstraints,
+		UnevaluatedConstraints: unevaluatedConstraints,
+		Nodes:                  make([]NodePlacementEligibility, 0, len(nodes)),
 	}
 	for _, node := range nodes {
 		result := NodePlacementEligibility{
@@ -198,6 +216,14 @@ func assessNodePlacement(nodes []Node) PlacementEligibility {
 				Message: fmt.Sprintf("availability is %s", node.Availability),
 			})
 		}
+		for _, constraint := range supportedConstraints {
+			if !constraint.matches(node) {
+				result.Blockers = append(result.Blockers, PlacementBlocker{
+					Code:    "constraint_mismatch",
+					Message: fmt.Sprintf("constraint %s does not match", constraint.raw),
+				})
+			}
+		}
 		result.PassesEvaluatedChecks = len(result.Blockers) == 0
 		eligibility.Nodes = append(eligibility.Nodes, result)
 	}
@@ -208,6 +234,62 @@ func assessNodePlacement(nodes []Node) PlacementEligibility {
 		return eligibility.Nodes[a].ID < eligibility.Nodes[b].ID
 	})
 	return eligibility
+}
+
+func parsePlacementConstraints(rawConstraints []string) ([]placementConstraint, []string) {
+	constraints := make([]placementConstraint, 0, len(rawConstraints))
+	unevaluated := make([]string, 0)
+	for _, raw := range rawConstraints {
+		constraint, supported := parsePlacementConstraint(raw)
+		if supported {
+			constraints = append(constraints, constraint)
+		} else {
+			unevaluated = append(unevaluated, raw)
+		}
+	}
+	return constraints, unevaluated
+}
+
+func parsePlacementConstraint(raw string) (placementConstraint, bool) {
+	operator := "=="
+	operatorIndex := strings.Index(raw, operator)
+	if operatorIndex < 0 {
+		operator = "!="
+		operatorIndex = strings.Index(raw, operator)
+	}
+	if operatorIndex < 0 {
+		return placementConstraint{}, false
+	}
+	key := strings.TrimSpace(raw[:operatorIndex])
+	value := strings.TrimSpace(raw[operatorIndex+len(operator):])
+	if value == "" {
+		return placementConstraint{}, false
+	}
+	supported := key == "node.id" || key == "node.hostname" || key == "node.role" || strings.HasPrefix(key, "node.labels.") && len(key) > len("node.labels.")
+	if !supported {
+		return placementConstraint{}, false
+	}
+	return placementConstraint{raw: raw, key: key, value: value, operator: operator}, true
+}
+
+func (c placementConstraint) matches(node Node) bool {
+	actual := ""
+	found := true
+	switch {
+	case c.key == "node.id":
+		actual = node.ID
+	case c.key == "node.hostname":
+		actual = node.Hostname
+	case c.key == "node.role":
+		actual = node.Role
+	case strings.HasPrefix(c.key, "node.labels."):
+		actual, found = node.Labels[strings.TrimPrefix(c.key, "node.labels.")]
+	}
+	equal := found && strings.EqualFold(actual, c.value)
+	if c.operator == "!=" {
+		return !equal
+	}
+	return equal
 }
 
 func terminalTaskState(state string) bool {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/ebaldebo/skepr/internal/status"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStatusPrintsClusterSummary(t *testing.T) {
@@ -287,11 +288,13 @@ Current failures:
 Recent terminal tasks:
   database.1  failed  worker-1  old failure
 
-Placement eligibility (readiness and availability only):
+Placement eligibility (readiness, availability and supported constraints):
   manager-1  passes evaluated checks
   manager-2  passes evaluated checks
   worker-1   passes evaluated checks
-Not evaluated: constraints, platform, resources, replica limits, ports, storage
+Evaluated constraints: none
+Unevaluated constraints: none
+Other inputs not evaluated: platform, resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -303,7 +306,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
 
 	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.JSONEq(t, `{
-  "schema_version": 2,
+  "schema_version": 3,
   "health": "degraded",
   "service": {
     "id": "s2",
@@ -338,16 +341,18 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
   "placement_eligibility": {
     "evaluated_inputs": [
       "node_readiness",
-      "node_availability"
+      "node_availability",
+      "placement_constraints"
     ],
     "unevaluated_inputs": [
-      "placement_constraints",
       "platform_requirements",
       "resource_reservations",
       "maximum_replicas_per_node",
       "host_published_port_conflicts",
       "storage_portability"
     ],
+    "evaluated_constraints": [],
+    "unevaluated_constraints": [],
     "nodes": [
       {
         "id": "m1",
@@ -389,11 +394,13 @@ Current failures: none
 Recent terminal tasks:
   api.1  failed  worker-1  old rollout failure
 
-Placement eligibility (readiness and availability only):
+Placement eligibility (readiness, availability and supported constraints):
   manager-1  passes evaluated checks
   manager-2  passes evaluated checks
   worker-1   passes evaluated checks
-Not evaluated: constraints, platform, resources, replica limits, ports, storage
+Evaluated constraints: none
+Unevaluated constraints: none
+Other inputs not evaluated: platform, resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -422,11 +429,13 @@ Current failures: none
 
 Recent terminal tasks: none
 
-Placement eligibility (readiness and availability only):
+Placement eligibility (readiness, availability and supported constraints):
   manager-1  passes evaluated checks
   worker-1   blocked: state is down
   worker-2   blocked: availability is drain
-Not evaluated: constraints, platform, resources, replica limits, ports, storage
+Evaluated constraints: none
+Unevaluated constraints: none
+Other inputs not evaluated: platform, resources, replica limits, ports, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -443,6 +452,78 @@ Not evaluated: constraints, platform, resources, replica limits, ports, storage
 		Code:    "node_not_active",
 		Message: "availability is drain",
 	}}, diagnosis.PlacementEligibility.Nodes[2].Blockers)
+}
+
+func TestServiceDiagnoseReportsPlacementConstraintEligibility(t *testing.T) {
+	t.Parallel()
+
+	connector := &fakeConnector{connection: resultInspector{result: status.Result{
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "worker-east", State: "ready", Availability: "active", Labels: map[string]string{"region": "east"}},
+			{ID: "w2", Hostname: "worker-west", State: "ready", Availability: "active", Labels: map[string]string{"region": "west"}},
+			{ID: "w3", Hostname: "worker-unlabeled", State: "ready", Availability: "active"},
+		},
+		Services: []status.Service{
+			{ID: "s1", Name: "database", Mode: "replicated", DesiredTasks: 1, PlacementConstraints: []string{"node.labels.region==east", "engine.labels.storage==ssd"}},
+		},
+	}}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "database"}, connector, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED service database
+Mode: replicated
+Tasks: 0/1 running
+
+Current failures: none
+
+Recent terminal tasks: none
+
+Placement eligibility (readiness, availability and supported constraints):
+  worker-east       passes evaluated checks
+  worker-unlabeled  blocked: constraint node.labels.region==east does not match
+  worker-west       blocked: constraint node.labels.region==east does not match
+Evaluated constraints: node.labels.region==east
+Unevaluated constraints: engine.labels.storage==ssd
+Other inputs not evaluated: platform, resources, replica limits, ports, storage
+`, stdout.String())
+}
+
+func TestServiceDiagnosisEvaluatesSupportedPlacementConstraints(t *testing.T) {
+	tests := []struct {
+		name            string
+		constraint      string
+		node            status.Node
+		wantPass        bool
+		wantUnevaluated []string
+	}{
+		{name: "node ID equality", constraint: "node.id==w1", node: status.Node{ID: "w1"}, wantPass: true},
+		{name: "hostname mismatch", constraint: "node.hostname==worker-2", node: status.Node{Hostname: "worker-1"}},
+		{name: "role inequality", constraint: "node.role!=manager", node: status.Node{Role: "worker"}, wantPass: true},
+		{name: "label inequality mismatch", constraint: "node.labels.storage!=ssd", node: status.Node{Labels: map[string]string{"storage": "ssd"}}},
+		{name: "missing label satisfies inequality", constraint: "node.labels.storage!=ssd", node: status.Node{}, wantPass: true},
+		{name: "platform remains unevaluated", constraint: "node.platform.os==linux", node: status.Node{}, wantPass: true, wantUnevaluated: []string{"node.platform.os==linux"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.node.State = "ready"
+			test.node.Availability = "active"
+			diagnosis, found := status.DiagnoseService(status.Result{
+				Nodes:    []status.Node{test.node},
+				Services: []status.Service{{ID: "s1", PlacementConstraints: []string{test.constraint}}},
+			}, "s1")
+
+			require.True(t, found)
+			require.Len(t, diagnosis.PlacementEligibility.Nodes, 1)
+			assert.Equal(t, test.wantPass, diagnosis.PlacementEligibility.Nodes[0].PassesEvaluatedChecks)
+			wantUnevaluated := test.wantUnevaluated
+			if wantUnevaluated == nil {
+				wantUnevaluated = []string{}
+			}
+			assert.Equal(t, wantUnevaluated, diagnosis.PlacementEligibility.UnevaluatedConstraints)
+		})
+	}
 }
 
 func TestAssessHealthEvaluatesNodeAndManagerHealth(t *testing.T) {
