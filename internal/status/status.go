@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -11,7 +12,16 @@ import (
 
 const SchemaVersion = 1
 const HealthSchemaVersion = 2
-const ServiceDiagnosisSchemaVersion = 6
+const ServiceDiagnosisSchemaVersion = 7
+
+type HostPort struct {
+	Protocol      string `json:"protocol"`
+	PublishedPort uint32 `json:"published_port"`
+}
+
+func (p HostPort) String() string {
+	return fmt.Sprintf("%d/%s", p.PublishedPort, p.Protocol)
+}
 
 type Resources struct {
 	NanoCPUs    int64 `json:"nano_cpus"`
@@ -80,20 +90,22 @@ type Service struct {
 	RequiredPlatforms    []Platform `json:"-"`
 	Reservations         Resources  `json:"-"`
 	MaxReplicasPerNode   uint64     `json:"-"`
+	HostPorts            []HostPort `json:"-"`
 }
 
 type Task struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	ServiceID    string    `json:"-"`
-	Service      string    `json:"service"`
-	NodeID       string    `json:"-"`
-	Node         string    `json:"node"`
-	DesiredState string    `json:"desired_state"`
-	State        string    `json:"state"`
-	Error        string    `json:"error,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at,omitzero"`
-	Reservations Resources `json:"-"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	ServiceID    string     `json:"-"`
+	Service      string     `json:"service"`
+	NodeID       string     `json:"-"`
+	Node         string     `json:"node"`
+	DesiredState string     `json:"desired_state"`
+	State        string     `json:"state"`
+	Error        string     `json:"error,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at,omitzero"`
+	Reservations Resources  `json:"-"`
+	HostPorts    []HostPort `json:"-"`
 }
 
 type Result struct {
@@ -166,6 +178,7 @@ type PlacementEligibility struct {
 	RequiredPlatforms      []Platform                 `json:"required_platforms"`
 	RequiredResources      Resources                  `json:"required_resources"`
 	MaxReplicasPerNode     uint64                     `json:"max_replicas_per_node"`
+	RequiredHostPorts      []HostPort                 `json:"required_host_ports"`
 	Nodes                  []NodePlacementEligibility `json:"nodes"`
 }
 
@@ -176,6 +189,7 @@ type NodePlacementEligibility struct {
 	Blockers              []PlacementBlocker `json:"blockers"`
 	Resources             NodeResources      `json:"resources,omitzero"`
 	ActiveServiceTasks    uint64             `json:"active_service_tasks"`
+	UsedHostPorts         []HostPort         `json:"used_host_ports"`
 }
 
 type NodeResources struct {
@@ -241,31 +255,36 @@ type placementConstraint struct {
 
 func assessNodePlacement(inventory Result, service Service) PlacementEligibility {
 	supportedConstraints, unevaluatedConstraints := parsePlacementConstraints(service.PlacementConstraints)
+	requiredHostPorts := canonicalHostPorts(service.HostPorts)
 	evaluatedConstraints := make([]string, 0, len(supportedConstraints))
 	for _, constraint := range supportedConstraints {
 		evaluatedConstraints = append(evaluatedConstraints, constraint.raw)
 	}
 	eligibility := PlacementEligibility{
-		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations", "maximum_replicas_per_node"},
-		UnevaluatedInputs:      []string{"generic_resources", "host_published_port_conflicts", "storage_portability"},
+		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations", "maximum_replicas_per_node", "host_published_port_conflicts"},
+		UnevaluatedInputs:      []string{"generic_resources", "storage_portability"},
 		EvaluatedConstraints:   evaluatedConstraints,
 		UnevaluatedConstraints: unevaluatedConstraints,
 		RequiredPlatforms:      append([]Platform{}, service.RequiredPlatforms...),
 		RequiredResources:      service.Reservations,
 		MaxReplicasPerNode:     service.MaxReplicasPerNode,
+		RequiredHostPorts:      requiredHostPorts,
 		Nodes:                  make([]NodePlacementEligibility, 0, len(inventory.Nodes)),
 	}
 	reservedByNode := reservedResourcesByNode(inventory.Tasks)
 	activeServiceTasksByNode := activeTasksByNode(inventory.Tasks, service.ID)
+	usedHostPortsByNode := usedHostPortsByNode(inventory.Tasks)
 	for _, node := range inventory.Nodes {
 		reserved := reservedByNode[node.ID]
 		available := availableResources(node.Resources, reserved)
 		activeServiceTasks := activeServiceTasksByNode[node.ID]
+		usedHostPorts := usedHostPortsByNode[node.ID]
 		result := NodePlacementEligibility{
 			ID:                 node.ID,
 			Hostname:           node.Hostname,
 			Blockers:           []PlacementBlocker{},
 			ActiveServiceTasks: activeServiceTasks,
+			UsedHostPorts:      append([]HostPort{}, usedHostPorts...),
 			Resources: NodeResources{
 				Capacity:  node.Resources,
 				Reserved:  reserved,
@@ -324,6 +343,14 @@ func assessNodePlacement(inventory Result, service Service) PlacementEligibility
 				Message: fmt.Sprintf("service already has %d active %s, limit is %d", activeServiceTasks, taskWord, service.MaxReplicasPerNode),
 			})
 		}
+		for _, requiredPort := range requiredHostPorts {
+			if slices.Contains(usedHostPorts, requiredPort) {
+				result.Blockers = append(result.Blockers, PlacementBlocker{
+					Code:    "host_port_conflict",
+					Message: fmt.Sprintf("host port %s is already in use", requiredPort),
+				})
+			}
+		}
 		result.PassesEvaluatedChecks = len(result.Blockers) == 0
 		eligibility.Nodes = append(eligibility.Nodes, result)
 	}
@@ -334,6 +361,45 @@ func assessNodePlacement(inventory Result, service Service) PlacementEligibility
 		return eligibility.Nodes[a].ID < eligibility.Nodes[b].ID
 	})
 	return eligibility
+}
+
+func canonicalHostPorts(ports []HostPort) []HostPort {
+	canonical := make([]HostPort, 0, len(ports))
+	for _, port := range ports {
+		if !slices.Contains(canonical, port) {
+			canonical = append(canonical, port)
+		}
+	}
+	sort.Slice(canonical, func(a, b int) bool {
+		if canonical[a].PublishedPort != canonical[b].PublishedPort {
+			return canonical[a].PublishedPort < canonical[b].PublishedPort
+		}
+		return canonical[a].Protocol < canonical[b].Protocol
+	})
+	return canonical
+}
+
+func usedHostPortsByNode(tasks []Task) map[string][]HostPort {
+	used := make(map[string][]HostPort)
+	for _, task := range tasks {
+		if task.NodeID == "" || terminalTaskState(task.State) {
+			continue
+		}
+		for _, port := range task.HostPorts {
+			if !slices.Contains(used[task.NodeID], port) {
+				used[task.NodeID] = append(used[task.NodeID], port)
+			}
+		}
+	}
+	for nodeID := range used {
+		sort.Slice(used[nodeID], func(a, b int) bool {
+			if used[nodeID][a].PublishedPort != used[nodeID][b].PublishedPort {
+				return used[nodeID][a].PublishedPort < used[nodeID][b].PublishedPort
+			}
+			return used[nodeID][a].Protocol < used[nodeID][b].Protocol
+		})
+	}
+	return used
 }
 
 func activeTasksByNode(tasks []Task, serviceID string) map[string]uint64 {

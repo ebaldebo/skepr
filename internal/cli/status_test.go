@@ -296,8 +296,9 @@ Evaluated constraints: none
 Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
+Required host ports: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, ports, storage
+Other inputs not evaluated: generic resources, storage
 `, stdout.String())
 }
 
@@ -309,7 +310,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
 
 	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.JSONEq(t, `{
-  "schema_version": 6,
+  "schema_version": 7,
   "health": "degraded",
   "service": {
     "id": "s2",
@@ -348,11 +349,11 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
       "placement_constraints",
       "platform_requirements",
       "cpu_memory_reservations",
-      "maximum_replicas_per_node"
+      "maximum_replicas_per_node",
+      "host_published_port_conflicts"
     ],
     "unevaluated_inputs": [
       "generic_resources",
-      "host_published_port_conflicts",
       "storage_portability"
     ],
     "evaluated_constraints": [],
@@ -363,12 +364,14 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
       "memory_bytes": 0
     },
     "max_replicas_per_node": 0,
+    "required_host_ports": [],
     "nodes": [
       {
         "id": "m1",
         "hostname": "manager-1",
         "passes_evaluated_checks": true,
         "active_service_tasks": 0,
+        "used_host_ports": [],
         "blockers": []
       },
       {
@@ -376,6 +379,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
         "hostname": "manager-2",
         "passes_evaluated_checks": true,
         "active_service_tasks": 0,
+        "used_host_ports": [],
         "blockers": []
       },
       {
@@ -383,6 +387,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
         "hostname": "worker-1",
         "passes_evaluated_checks": true,
         "active_service_tasks": 0,
+        "used_host_ports": [],
         "blockers": []
       }
     ]
@@ -415,8 +420,9 @@ Evaluated constraints: none
 Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
+Required host ports: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, ports, storage
+Other inputs not evaluated: generic resources, storage
 `, stdout.String())
 }
 
@@ -453,8 +459,9 @@ Evaluated constraints: none
 Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
+Required host ports: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, ports, storage
+Other inputs not evaluated: generic resources, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -506,8 +513,9 @@ Evaluated constraints: node.labels.region==east
 Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
+Required host ports: none
 Unevaluated constraints: engine.labels.storage==ssd
-Other inputs not evaluated: generic resources, ports, storage
+Other inputs not evaluated: generic resources, storage
 `, stdout.String())
 }
 
@@ -582,8 +590,9 @@ Evaluated constraints: none
 Required platforms: linux/amd64
 Required resources: none
 Maximum replicas per node: unlimited
+Required host ports: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, ports, storage
+Other inputs not evaluated: generic resources, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -637,8 +646,9 @@ Evaluated constraints: none
 Required platforms: any
 Required resources: 2 CPUs, 2 GiB memory
 Maximum replicas per node: unlimited
+Required host ports: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, ports, storage
+Other inputs not evaluated: generic resources, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -724,8 +734,9 @@ Evaluated constraints: none
 Required platforms: any
 Required resources: none
 Maximum replicas per node: 1
+Required host ports: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, ports, storage
+Other inputs not evaluated: generic resources, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -737,6 +748,63 @@ Other inputs not evaluated: generic resources, ports, storage
 	assert.Equal(t, uint64(1), diagnosis.PlacementEligibility.Nodes[0].ActiveServiceTasks)
 	assert.Equal(t, "max_replicas_per_node", diagnosis.PlacementEligibility.Nodes[0].Blockers[0].Code)
 	assert.Equal(t, uint64(0), diagnosis.PlacementEligibility.Nodes[2].ActiveServiceTasks)
+	assert.True(t, diagnosis.PlacementEligibility.Nodes[2].PassesEvaluatedChecks)
+}
+
+func TestServiceDiagnoseReportsHostPortEligibility(t *testing.T) {
+	t.Parallel()
+
+	connector := &fakeConnector{connection: resultInspector{result: status.Result{
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "worker-1", State: "ready", Availability: "active"},
+			{ID: "w2", Hostname: "worker-2", State: "ready", Availability: "active"},
+			{ID: "w3", Hostname: "worker-3", State: "ready", Availability: "active"},
+		},
+		Services: []status.Service{
+			{ID: "s1", Name: "api", Mode: "replicated", DesiredTasks: 1, HostPorts: []status.HostPort{{Protocol: "tcp", PublishedPort: 8080}, {Protocol: "udp", PublishedPort: 5353}}},
+		},
+		Tasks: []status.Task{
+			{ID: "t1", ServiceID: "s2", NodeID: "w1", State: "running", HostPorts: []status.HostPort{{Protocol: "tcp", PublishedPort: 8080}}},
+			{ID: "t2", ServiceID: "s3", NodeID: "w2", State: "preparing", HostPorts: []status.HostPort{{Protocol: "udp", PublishedPort: 5353}}},
+			{ID: "old", ServiceID: "s4", NodeID: "w3", State: "failed", HostPorts: []status.HostPort{{Protocol: "tcp", PublishedPort: 8080}}},
+		},
+	}}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "api"}, connector, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED service api
+Mode: replicated
+Tasks: 0/1 running
+
+Current failures: none
+
+Recent terminal tasks: none
+
+Placement eligibility:
+  worker-1  blocked: host port 8080/tcp is already in use
+  worker-2  blocked: host port 5353/udp is already in use
+  worker-3  passes evaluated checks
+Evaluated constraints: none
+Required platforms: any
+Required resources: none
+Maximum replicas per node: unlimited
+Required host ports: 5353/udp, 8080/tcp
+Unevaluated constraints: none
+Other inputs not evaluated: generic resources, storage
+`, stdout.String())
+
+	stdout.Reset()
+	exitCode = Run(context.Background(), []string{"service", "diagnose", "api", "--json"}, connector, &stdout, &bytes.Buffer{})
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	var diagnosis status.ServiceDiagnosis
+	assert.NoError(t, json.Unmarshal(stdout.Bytes(), &diagnosis))
+	assert.Equal(t, []status.HostPort{{Protocol: "udp", PublishedPort: 5353}, {Protocol: "tcp", PublishedPort: 8080}}, diagnosis.PlacementEligibility.RequiredHostPorts)
+	assert.Equal(t, []status.HostPort{{Protocol: "tcp", PublishedPort: 8080}}, diagnosis.PlacementEligibility.Nodes[0].UsedHostPorts)
+	assert.Equal(t, "host_port_conflict", diagnosis.PlacementEligibility.Nodes[0].Blockers[0].Code)
+	assert.Equal(t, []status.HostPort{{Protocol: "udp", PublishedPort: 5353}}, diagnosis.PlacementEligibility.Nodes[1].UsedHostPorts)
+	assert.Equal(t, "host_port_conflict", diagnosis.PlacementEligibility.Nodes[1].Blockers[0].Code)
+	assert.Empty(t, diagnosis.PlacementEligibility.Nodes[2].UsedHostPorts)
 	assert.True(t, diagnosis.PlacementEligibility.Nodes[2].PassesEvaluatedChecks)
 }
 

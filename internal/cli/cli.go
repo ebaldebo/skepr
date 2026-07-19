@@ -152,12 +152,21 @@ func runServiceDiagnose(ctx context.Context, args []string, contextName string, 
 	} else {
 		_, _ = fmt.Fprintf(&output, "Maximum replicas per node: %d\n", diagnosis.PlacementEligibility.MaxReplicasPerNode)
 	}
+	if len(diagnosis.PlacementEligibility.RequiredHostPorts) == 0 {
+		output.WriteString("Required host ports: none\n")
+	} else {
+		ports := make([]string, 0, len(diagnosis.PlacementEligibility.RequiredHostPorts))
+		for _, port := range diagnosis.PlacementEligibility.RequiredHostPorts {
+			ports = append(ports, port.String())
+		}
+		_, _ = fmt.Fprintf(&output, "Required host ports: %s\n", strings.Join(ports, ", "))
+	}
 	if len(diagnosis.PlacementEligibility.UnevaluatedConstraints) == 0 {
 		output.WriteString("Unevaluated constraints: none\n")
 	} else {
 		_, _ = fmt.Fprintf(&output, "Unevaluated constraints: %s\n", strings.Join(diagnosis.PlacementEligibility.UnevaluatedConstraints, ", "))
 	}
-	output.WriteString("Other inputs not evaluated: generic resources, ports, storage\n")
+	output.WriteString("Other inputs not evaluated: generic resources, storage\n")
 	if _, err := io.WriteString(stdout, output.String()); err != nil {
 		report(stderr, "write service diagnosis output: %v\n", err)
 		return ExitDockerConnection

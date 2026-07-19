@@ -154,6 +154,12 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 			},
 		},
 		Mode: swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &replicas}},
+		EndpointSpec: &swarm.EndpointSpec{Ports: []swarm.PortConfig{{
+			Protocol:      "tcp",
+			TargetPort:    80,
+			PublishedPort: 45678,
+			PublishMode:   swarm.PortConfigPublishModeHost,
+		}}},
 	}})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -188,11 +194,12 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, uint64(0), diagnosis.Service.RunningTasks)
 	assert.Equal(t, uint64(1), diagnosis.Service.DesiredTasks)
 	assert.Empty(t, diagnosis.CurrentFailures)
-	assert.Equal(t, []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations", "maximum_replicas_per_node"}, diagnosis.PlacementEligibility.EvaluatedInputs)
+	assert.Equal(t, []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations", "maximum_replicas_per_node", "host_published_port_conflicts"}, diagnosis.PlacementEligibility.EvaluatedInputs)
 	assert.Equal(t, []string{"node.hostname==missing-node"}, diagnosis.PlacementEligibility.EvaluatedConstraints)
 	assert.Equal(t, []status.Platform{{OS: "windows"}}, diagnosis.PlacementEligibility.RequiredPlatforms)
 	assert.Equal(t, status.Resources{MemoryBytes: 1 << 60}, diagnosis.PlacementEligibility.RequiredResources)
 	assert.Equal(t, uint64(1), diagnosis.PlacementEligibility.MaxReplicasPerNode)
+	assert.Equal(t, []status.HostPort{{Protocol: "tcp", PublishedPort: 45678}}, diagnosis.PlacementEligibility.RequiredHostPorts)
 	require.Len(t, diagnosis.PlacementEligibility.Nodes, 5)
 	for _, node := range diagnosis.PlacementEligibility.Nodes {
 		wantCodes := []string{"constraint_mismatch", "platform_mismatch", "insufficient_memory"}
@@ -201,6 +208,7 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 		}
 		assert.False(t, node.PassesEvaluatedChecks, node.Hostname)
 		assert.Zero(t, node.ActiveServiceTasks, node.Hostname)
+		assert.Empty(t, node.UsedHostPorts, node.Hostname)
 		require.Len(t, node.Blockers, len(wantCodes), node.Hostname)
 		for index, code := range wantCodes {
 			assert.Equal(t, code, node.Blockers[index].Code, node.Hostname)

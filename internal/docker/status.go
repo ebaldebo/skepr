@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"sort"
 
 	"github.com/ebaldebo/skepr/internal/status"
@@ -135,6 +136,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			RequiredPlatforms:    requiredPlatforms(service.Spec.TaskTemplate.Placement),
 			Reservations:         resourceReservations(service.Spec.TaskTemplate.Resources),
 			MaxReplicasPerNode:   maxReplicasPerNode(service.Spec.TaskTemplate.Placement),
+			HostPorts:            serviceHostPorts(service.Spec.EndpointSpec),
 		})
 	}
 	sort.Slice(result.Services, func(a, b int) bool {
@@ -176,6 +178,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			Error:        task.Status.Err,
 			UpdatedAt:    task.UpdatedAt,
 			Reservations: resourceReservations(task.Spec.Resources),
+			HostPorts:    taskHostPorts(task.Status.PortStatus),
 		}
 		result.Tasks = append(result.Tasks, normalizedTask)
 		if task.DesiredState != swarm.TaskStateRunning {
@@ -230,6 +233,57 @@ func maxReplicasPerNode(placement *swarm.Placement) uint64 {
 		return 0
 	}
 	return placement.MaxReplicas
+}
+
+func serviceHostPorts(endpoint *swarm.EndpointSpec) []status.HostPort {
+	if endpoint == nil {
+		return nil
+	}
+	ports := make([]status.HostPort, 0, len(endpoint.Ports))
+	for _, port := range endpoint.Ports {
+		if port.PublishMode != swarm.PortConfigPublishModeHost || port.PublishedPort == 0 {
+			continue
+		}
+		ports = appendHostPort(ports, port)
+	}
+	sortHostPorts(ports)
+	return ports
+}
+
+func taskHostPorts(portStatus swarm.PortStatus) []status.HostPort {
+	if len(portStatus.Ports) == 0 {
+		return nil
+	}
+	ports := make([]status.HostPort, 0, len(portStatus.Ports))
+	for _, port := range portStatus.Ports {
+		if port.PublishedPort == 0 || port.PublishMode != "" && port.PublishMode != swarm.PortConfigPublishModeHost {
+			continue
+		}
+		ports = appendHostPort(ports, port)
+	}
+	sortHostPorts(ports)
+	return ports
+}
+
+func appendHostPort(ports []status.HostPort, port swarm.PortConfig) []status.HostPort {
+	protocol := string(port.Protocol)
+	if protocol == "" {
+		protocol = "tcp"
+	}
+	normalized := status.HostPort{Protocol: protocol, PublishedPort: port.PublishedPort}
+	if slices.Contains(ports, normalized) {
+		return ports
+	}
+	return append(ports, normalized)
+}
+
+func sortHostPorts(ports []status.HostPort) {
+	sort.Slice(ports, func(a, b int) bool {
+		if ports[a].PublishedPort != ports[b].PublishedPort {
+			return ports[a].PublishedPort < ports[b].PublishedPort
+		}
+		return ports[a].Protocol < ports[b].Protocol
+	})
 }
 
 func resourceReservations(requirements *swarm.ResourceRequirements) status.Resources {
