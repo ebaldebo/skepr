@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/ebaldebo/skepr/internal/status"
@@ -285,6 +286,12 @@ Current failures:
 
 Recent terminal tasks:
   database.1  failed  worker-1  old failure
+
+Placement eligibility (readiness and availability only):
+  manager-1  passes evaluated checks
+  manager-2  passes evaluated checks
+  worker-1   passes evaluated checks
+Not evaluated: constraints, platform, resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -296,7 +303,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
 
 	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.JSONEq(t, `{
-  "schema_version": 1,
+  "schema_version": 2,
   "health": "degraded",
   "service": {
     "id": "s2",
@@ -327,7 +334,41 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
       "state": "failed",
       "error": "old failure"
     }
-  ]
+  ],
+  "placement_eligibility": {
+    "evaluated_inputs": [
+      "node_readiness",
+      "node_availability"
+    ],
+    "unevaluated_inputs": [
+      "placement_constraints",
+      "platform_requirements",
+      "resource_reservations",
+      "maximum_replicas_per_node",
+      "host_published_port_conflicts",
+      "storage_portability"
+    ],
+    "nodes": [
+      {
+        "id": "m1",
+        "hostname": "manager-1",
+        "passes_evaluated_checks": true,
+        "blockers": []
+      },
+      {
+        "id": "m2",
+        "hostname": "manager-2",
+        "passes_evaluated_checks": true,
+        "blockers": []
+      },
+      {
+        "id": "w1",
+        "hostname": "worker-1",
+        "passes_evaluated_checks": true,
+        "blockers": []
+      }
+    ]
+  }
 }`, stdout.String())
 	assert.NotContains(t, stdout.String(), "\x1b")
 }
@@ -347,7 +388,61 @@ Current failures: none
 
 Recent terminal tasks:
   api.1  failed  worker-1  old rollout failure
+
+Placement eligibility (readiness and availability only):
+  manager-1  passes evaluated checks
+  manager-2  passes evaluated checks
+  worker-1   passes evaluated checks
+Not evaluated: constraints, platform, resources, replica limits, ports, storage
 `, stdout.String())
+}
+
+func TestServiceDiagnoseReportsNodeReadinessAndAvailabilityEligibility(t *testing.T) {
+	t.Parallel()
+
+	connector := &fakeConnector{connection: resultInspector{result: status.Result{
+		Nodes: []status.Node{
+			{ID: "m1", Hostname: "manager-1", State: "ready", Availability: "active"},
+			{ID: "w1", Hostname: "worker-1", State: "down", Availability: "active"},
+			{ID: "w2", Hostname: "worker-2", State: "ready", Availability: "drain"},
+		},
+		Services: []status.Service{
+			{ID: "s1", Name: "database", Mode: "replicated", DesiredTasks: 1},
+		},
+	}}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "database"}, connector, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED service database
+Mode: replicated
+Tasks: 0/1 running
+
+Current failures: none
+
+Recent terminal tasks: none
+
+Placement eligibility (readiness and availability only):
+  manager-1  passes evaluated checks
+  worker-1   blocked: state is down
+  worker-2   blocked: availability is drain
+Not evaluated: constraints, platform, resources, replica limits, ports, storage
+`, stdout.String())
+
+	stdout.Reset()
+	exitCode = Run(context.Background(), []string{"service", "diagnose", "database", "--json"}, connector, &stdout, &bytes.Buffer{})
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	var diagnosis status.ServiceDiagnosis
+	assert.NoError(t, json.Unmarshal(stdout.Bytes(), &diagnosis))
+	assert.Equal(t, status.ServiceDiagnosisSchemaVersion, diagnosis.SchemaVersion)
+	assert.Equal(t, []status.PlacementBlocker{{
+		Code:    "node_not_ready",
+		Message: "state is down",
+	}}, diagnosis.PlacementEligibility.Nodes[1].Blockers)
+	assert.Equal(t, []status.PlacementBlocker{{
+		Code:    "node_not_active",
+		Message: "availability is drain",
+	}}, diagnosis.PlacementEligibility.Nodes[2].Blockers)
 }
 
 func TestAssessHealthEvaluatesNodeAndManagerHealth(t *testing.T) {
@@ -443,6 +538,13 @@ func (fakeInspector) Inspect(context.Context) (status.Result, error) {
 }
 
 func (fakeInspector) Close() error { return nil }
+
+type resultInspector struct {
+	result status.Result
+}
+
+func (i resultInspector) Inspect(context.Context) (status.Result, error) { return i.result, nil }
+func (resultInspector) Close() error                                     { return nil }
 
 type unavailableInspector struct{}
 

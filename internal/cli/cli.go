@@ -126,6 +126,9 @@ func runServiceDiagnose(ctx context.Context, args []string, contextName string, 
 		output.WriteString("\nRecent terminal tasks:\n")
 		writeDiagnosisTasks(&output, diagnosis.RecentTerminalTasks)
 	}
+	output.WriteString("\nPlacement eligibility (readiness and availability only):\n")
+	writePlacementEligibility(&output, diagnosis.PlacementEligibility.Nodes)
+	output.WriteString("Not evaluated: constraints, platform, resources, replica limits, ports, storage\n")
 	if _, err := io.WriteString(stdout, output.String()); err != nil {
 		report(stderr, "write service diagnosis output: %v\n", err)
 		return ExitDockerConnection
@@ -144,6 +147,22 @@ func writeDiagnosisTasks(writer io.Writer, tasks []status.Task) {
 			_, _ = fmt.Fprintf(table, "\t%s", task.Error)
 		}
 		_, _ = fmt.Fprintln(table)
+	}
+	_ = table.Flush()
+}
+
+func writePlacementEligibility(writer io.Writer, nodes []status.NodePlacementEligibility) {
+	table := tabwriter.NewWriter(writer, 0, 2, 2, ' ', 0)
+	for _, node := range nodes {
+		result := "passes evaluated checks"
+		if !node.PassesEvaluatedChecks {
+			reasons := make([]string, 0, len(node.Blockers))
+			for _, blocker := range node.Blockers {
+				reasons = append(reasons, blocker.Message)
+			}
+			result = "blocked: " + strings.Join(reasons, "; ")
+		}
+		_, _ = fmt.Fprintf(table, "  %s\t%s\n", node.Hostname, result)
 	}
 	_ = table.Flush()
 }

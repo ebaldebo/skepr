@@ -181,6 +181,17 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, uint64(0), diagnosis.Service.RunningTasks)
 	assert.Equal(t, uint64(1), diagnosis.Service.DesiredTasks)
 	assert.Empty(t, diagnosis.CurrentFailures)
+	assert.Equal(t, []string{"node_readiness", "node_availability"}, diagnosis.PlacementEligibility.EvaluatedInputs)
+	require.Len(t, diagnosis.PlacementEligibility.Nodes, 5)
+	for _, node := range diagnosis.PlacementEligibility.Nodes {
+		if node.Hostname == "worker-2" {
+			assert.False(t, node.PassesEvaluatedChecks)
+			assert.Equal(t, []status.PlacementBlocker{{Code: "node_not_active", Message: "availability is drain"}}, node.Blockers)
+			continue
+		}
+		assert.True(t, node.PassesEvaluatedChecks, node.Hostname)
+		assert.Empty(t, node.Blockers, node.Hostname)
+	}
 
 	operation.Phase = maintenance.PhaseWaitingServices
 	operation.PhaseTimestamps[maintenance.PhaseWaitingServices] = time.Now().UTC()

@@ -11,7 +11,7 @@ import (
 
 const SchemaVersion = 1
 const HealthSchemaVersion = 2
-const ServiceDiagnosisSchemaVersion = 1
+const ServiceDiagnosisSchemaVersion = 2
 
 type Cluster struct {
 	ID               string `json:"id"`
@@ -105,11 +105,30 @@ type HealthReport struct {
 }
 
 type ServiceDiagnosis struct {
-	SchemaVersion       int     `json:"schema_version"`
-	Health              Health  `json:"health"`
-	Service             Service `json:"service"`
-	CurrentFailures     []Task  `json:"current_failures"`
-	RecentTerminalTasks []Task  `json:"recent_terminal_tasks"`
+	SchemaVersion        int                  `json:"schema_version"`
+	Health               Health               `json:"health"`
+	Service              Service              `json:"service"`
+	CurrentFailures      []Task               `json:"current_failures"`
+	RecentTerminalTasks  []Task               `json:"recent_terminal_tasks"`
+	PlacementEligibility PlacementEligibility `json:"placement_eligibility"`
+}
+
+type PlacementEligibility struct {
+	EvaluatedInputs   []string                   `json:"evaluated_inputs"`
+	UnevaluatedInputs []string                   `json:"unevaluated_inputs"`
+	Nodes             []NodePlacementEligibility `json:"nodes"`
+}
+
+type NodePlacementEligibility struct {
+	ID                    string             `json:"id"`
+	Hostname              string             `json:"hostname"`
+	PassesEvaluatedChecks bool               `json:"passes_evaluated_checks"`
+	Blockers              []PlacementBlocker `json:"blockers"`
+}
+
+type PlacementBlocker struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 func DiagnoseService(result Result, requested string) (ServiceDiagnosis, bool) {
@@ -118,11 +137,12 @@ func DiagnoseService(result Result, requested string) (ServiceDiagnosis, bool) {
 		return ServiceDiagnosis{}, false
 	}
 	diagnosis := ServiceDiagnosis{
-		SchemaVersion:       ServiceDiagnosisSchemaVersion,
-		Health:              HealthHealthy,
-		Service:             service,
-		CurrentFailures:     []Task{},
-		RecentTerminalTasks: []Task{},
+		SchemaVersion:        ServiceDiagnosisSchemaVersion,
+		Health:               HealthHealthy,
+		Service:              service,
+		CurrentFailures:      []Task{},
+		RecentTerminalTasks:  []Task{},
+		PlacementEligibility: assessNodePlacement(result.Nodes),
 	}
 	for _, task := range result.UnhealthyTasks {
 		if task.ServiceID == service.ID {
@@ -152,6 +172,42 @@ func DiagnoseService(result Result, requested string) (ServiceDiagnosis, bool) {
 		diagnosis.Health = HealthDegraded
 	}
 	return diagnosis, true
+}
+
+func assessNodePlacement(nodes []Node) PlacementEligibility {
+	eligibility := PlacementEligibility{
+		EvaluatedInputs:   []string{"node_readiness", "node_availability"},
+		UnevaluatedInputs: []string{"placement_constraints", "platform_requirements", "resource_reservations", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability"},
+		Nodes:             make([]NodePlacementEligibility, 0, len(nodes)),
+	}
+	for _, node := range nodes {
+		result := NodePlacementEligibility{
+			ID:       node.ID,
+			Hostname: node.Hostname,
+			Blockers: []PlacementBlocker{},
+		}
+		if node.State != "ready" {
+			result.Blockers = append(result.Blockers, PlacementBlocker{
+				Code:    "node_not_ready",
+				Message: fmt.Sprintf("state is %s", node.State),
+			})
+		}
+		if node.Availability != "active" {
+			result.Blockers = append(result.Blockers, PlacementBlocker{
+				Code:    "node_not_active",
+				Message: fmt.Sprintf("availability is %s", node.Availability),
+			})
+		}
+		result.PassesEvaluatedChecks = len(result.Blockers) == 0
+		eligibility.Nodes = append(eligibility.Nodes, result)
+	}
+	sort.Slice(eligibility.Nodes, func(a, b int) bool {
+		if eligibility.Nodes[a].Hostname != eligibility.Nodes[b].Hostname {
+			return eligibility.Nodes[a].Hostname < eligibility.Nodes[b].Hostname
+		}
+		return eligibility.Nodes[a].ID < eligibility.Nodes[b].ID
+	})
+	return eligibility
 }
 
 func terminalTaskState(state string) bool {
