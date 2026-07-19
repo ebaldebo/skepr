@@ -525,43 +525,41 @@ func runStatus(ctx context.Context, args []string, contextName string, connector
 		report(stderr, "inspect Docker Swarm: %v\n", err)
 		return ExitDockerConnection
 	}
+	assessment := status.AssessHealth(result)
 	if *jsonOutput {
 		encoder := json.NewEncoder(stdout)
 		encoder.SetEscapeHTML(false)
 		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(result); err != nil {
+		if err := encoder.Encode(status.BuildHealthReport(result, assessment)); err != nil {
 			report(stderr, "write status output: %v\n", err)
 			return ExitDockerConnection
+		}
+		if assessment.Health == status.HealthDegraded {
+			return ExitSafetyGate
 		}
 		return ExitSuccess
 	}
 
 	var output strings.Builder
-	for _, task := range result.UnhealthyTasks {
-		_, _ = fmt.Fprintf(&output, "UNSAFE: task %s is %s", task.Name, task.State)
-		if task.Error != "" {
-			_, _ = fmt.Fprintf(&output, ": %s", task.Error)
-		}
+	_, _ = fmt.Fprintln(&output, strings.ToUpper(string(assessment.Health)))
+	for _, finding := range assessment.Findings {
+		_, _ = fmt.Fprintf(&output, "  %s\n", finding.Message)
+	}
+	if len(assessment.Findings) > 0 {
 		output.WriteByte('\n')
 	}
-	for _, service := range result.Services {
-		if !service.Converged {
-			_, _ = fmt.Fprintf(&output, "UNSAFE: service %s has %d/%d running tasks\n", service.Name, service.RunningTasks, service.DesiredTasks)
-		}
-	}
+	_, _ = fmt.Fprintf(&output, "Managers: %d/%d healthy\n", assessment.Summary.HealthyManagers, assessment.Summary.Managers)
+	_, _ = fmt.Fprintf(&output, "Nodes: %d/%d ready, %d active\n", assessment.Summary.ReadyNodes, assessment.Summary.Nodes, assessment.Summary.ActiveNodes)
+	_, _ = fmt.Fprintf(&output, "Services: %d/%d converged\n", assessment.Summary.ConvergedServices, assessment.Summary.Services)
 	control := "unavailable"
 	if result.Cluster.ControlAvailable {
 		control = "available"
-	} else {
-		output.WriteString("UNSAFE: Swarm control is unavailable\n")
 	}
-	_, _ = fmt.Fprintf(
-		&output, "Cluster: %s\nEndpoint: %s\nSwarm: %s\nControl: %s\n",
-		result.Cluster.ID,
-		result.Endpoint,
-		result.Cluster.LocalState,
-		control,
-	)
+	output.WriteString("Cluster:")
+	if result.Cluster.ID != "" {
+		_, _ = fmt.Fprintf(&output, " %s", result.Cluster.ID)
+	}
+	_, _ = fmt.Fprintf(&output, "\nEndpoint: %s\nSwarm: %s\nControl: %s\n", result.Endpoint, result.Cluster.LocalState, control)
 	if result.Leader != "" {
 		_, _ = fmt.Fprintf(&output, "Leader: %s\n", result.Leader)
 	}
@@ -623,6 +621,9 @@ func runStatus(ctx context.Context, args []string, contextName string, connector
 	if err != nil {
 		report(stderr, "write status output: %v\n", err)
 		return ExitDockerConnection
+	}
+	if assessment.Health == status.HealthDegraded {
+		return ExitSafetyGate
 	}
 	return ExitSuccess
 }

@@ -45,8 +45,15 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	exitCode := cli.Run(context.Background(), []string{"status", "--json"}, connector, &statusOutput, &statusErrors)
 	require.Equal(t, cli.ExitSuccess, exitCode, statusErrors.String())
 
-	var inventory status.Result
-	require.NoError(t, json.Unmarshal(statusOutput.Bytes(), &inventory))
+	var health status.HealthReport
+	require.NoError(t, json.Unmarshal(statusOutput.Bytes(), &health))
+	assert.Equal(t, status.HealthSchemaVersion, health.SchemaVersion)
+	assert.Equal(t, status.HealthHealthy, health.Health)
+	assert.Empty(t, health.Findings)
+	assert.Equal(t, 3, health.Summary.HealthyManagers)
+	assert.Equal(t, 5, health.Summary.ReadyNodes)
+	assert.Equal(t, 5, health.Summary.ActiveNodes)
+	inventory := status.Result{Nodes: health.Nodes}
 	assert.Len(t, inventory.Nodes, 5)
 	managerCount := 0
 	workerCount := 0

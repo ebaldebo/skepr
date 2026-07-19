@@ -15,9 +15,14 @@ func TestStatusPrintsClusterSummary(t *testing.T) {
 	var stdout bytes.Buffer
 	exitCode := Run(context.Background(), []string{"status"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
 
-	assert.Equal(t, 0, exitCode)
-	assert.Equal(t, `UNSAFE: task database.1 is rejected: no suitable node
-UNSAFE: service database has 0/1 running tasks
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED
+  task database.1 is rejected: no suitable node
+  service database has 0/1 running tasks
+
+Managers: 2/2 healthy
+Nodes: 3/3 ready, 3 active
+Services: 2/3 converged
 Cluster: cluster-1
 Endpoint: unix:///var/run/docker.sock
 Swarm: active
@@ -45,9 +50,29 @@ func TestStatusJSONOutput(t *testing.T) {
 	var stdout bytes.Buffer
 	exitCode := Run(context.Background(), []string{"status", "--json"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
 
-	assert.Equal(t, 0, exitCode)
+	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.JSONEq(t, `{
-  "schema_version": 1,
+  "schema_version": 2,
+  "health": "degraded",
+  "findings": [
+    {
+      "code": "task_unhealthy",
+      "message": "task database.1 is rejected: no suitable node"
+    },
+    {
+      "code": "service_unconverged",
+      "message": "service database has 0/1 running tasks"
+    }
+  ],
+  "summary": {
+    "healthy_managers": 2,
+    "managers": 2,
+    "ready_nodes": 3,
+    "active_nodes": 3,
+    "nodes": 3,
+    "converged_services": 2,
+    "services": 3
+  },
   "endpoint": "unix:///var/run/docker.sock",
   "cluster": {
     "id": "cluster-1",
@@ -117,9 +142,29 @@ func TestStatusJSONOutput(t *testing.T) {
       "error": "no suitable node"
     }
   ]
-}`, stdout.String())
+	}`, stdout.String())
 	assert.Equal(t, `{
-  "schema_version": 1,
+  "schema_version": 2,
+  "health": "degraded",
+  "findings": [
+    {
+      "code": "task_unhealthy",
+      "message": "task database.1 is rejected: no suitable node"
+    },
+    {
+      "code": "service_unconverged",
+      "message": "service database has 0/1 running tasks"
+    }
+  ],
+  "summary": {
+    "healthy_managers": 2,
+    "managers": 2,
+    "ready_nodes": 3,
+    "active_nodes": 3,
+    "nodes": 3,
+    "converged_services": 2,
+    "services": 3
+  },
   "endpoint": "unix:///var/run/docker.sock",
   "cluster": {
     "id": "cluster-1",
@@ -193,14 +238,25 @@ func TestStatusJSONOutput(t *testing.T) {
 `, stdout.String())
 }
 
-func TestStatusPutsUnavailableControlFirst(t *testing.T) {
+func TestStatusReportsUnavailableSwarmFirst(t *testing.T) {
 	t.Parallel()
 
 	var stdout bytes.Buffer
 	exitCode := Run(context.Background(), []string{"status"}, &fakeConnector{connection: unavailableInspector{}}, &stdout, &bytes.Buffer{})
 
-	assert.Equal(t, 0, exitCode)
-	assert.Equal(t, "UNSAFE: Swarm control is unavailable\nCluster: \nEndpoint: unix:///var/run/docker.sock\nSwarm: inactive\nControl: unavailable\n", stdout.String())
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED
+  Swarm state is inactive, expected active
+  Swarm control is unavailable
+
+Managers: 0/0 healthy
+Nodes: 0/0 ready, 0 active
+Services: 0/0 converged
+Cluster:
+Endpoint: unix:///var/run/docker.sock
+Swarm: inactive
+Control: unavailable
+`, stdout.String())
 }
 
 func TestStatusUsesExplicitDockerContext(t *testing.T) {
@@ -209,8 +265,55 @@ func TestStatusUsesExplicitDockerContext(t *testing.T) {
 	connector := &fakeConnector{}
 	exitCode := Run(context.Background(), []string{"--context", "swarm", "status"}, connector, &bytes.Buffer{}, &bytes.Buffer{})
 
-	assert.Equal(t, 0, exitCode)
+	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.Equal(t, "swarm", connector.contextName)
+}
+
+func TestAssessHealthEvaluatesNodeAndManagerHealth(t *testing.T) {
+	tests := []struct {
+		name         string
+		nodes        []status.Node
+		wantHealth   status.Health
+		wantFindings []status.HealthFinding
+	}{
+		{
+			name: "healthy drained manager",
+			nodes: []status.Node{
+				{Hostname: "manager-1", Role: "manager", State: "ready", Availability: "drain", ManagerStatus: "leader"},
+				{Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+			},
+			wantHealth:   status.HealthHealthy,
+			wantFindings: []status.HealthFinding{},
+		},
+		{
+			name:       "manager status unavailable",
+			nodes:      []status.Node{{Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active"}},
+			wantHealth: status.HealthDegraded,
+			wantFindings: []status.HealthFinding{{
+				Code: "manager_unhealthy", Message: "manager manager-1 is unhealthy: manager status is unavailable, expected leader or reachable",
+			}},
+		},
+		{
+			name:       "worker down",
+			nodes:      []status.Node{{Hostname: "worker-1", Role: "worker", State: "down", Availability: "active"}},
+			wantHealth: status.HealthDegraded,
+			wantFindings: []status.HealthFinding{{
+				Code: "node_not_ready", Message: "node worker-1 state is down, expected ready",
+			}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assessment := status.AssessHealth(status.Result{
+				Cluster: status.Cluster{LocalState: "active", ControlAvailable: true},
+				Nodes:   test.nodes,
+			})
+
+			assert.Equal(t, test.wantHealth, assessment.Health)
+			assert.Equal(t, test.wantFindings, assessment.Findings)
+		})
+	}
 }
 
 type fakeConnector struct {
