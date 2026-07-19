@@ -17,21 +17,29 @@ import (
 )
 
 type maintenanceRunOptions struct {
-	target        string
-	planPath      string
-	resumeID      string
-	abortID       string
-	updateCommand []string
-	timeout       time.Duration
-	returnTimeout time.Duration
-	jsonOutput    bool
-	resolution    maintenance.CommandResolution
+	target           string
+	planPath         string
+	resumeID         string
+	abortID          string
+	preCommand       []string
+	updateCommand    []string
+	verifyCommand    []string
+	managerContexts  []string
+	managerEndpoints []string
+	preCommandSet    bool
+	updateSet        bool
+	verifySet        bool
+	dashCommand      bool
+	timeout          time.Duration
+	returnTimeout    time.Duration
+	jsonOutput       bool
+	resolution       maintenance.CommandResolution
 }
 
-func runMaintenanceTransaction(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+func runMaintenanceTransaction(ctx context.Context, args []string, contextName string, connector status.Connector, stdin io.Reader, stdout, stderr io.Writer) int {
 	options, err := parseMaintenanceRunArgs(args)
 	if err != nil {
-		report(stderr, "%v\nusage:\n  skepr [--context name] maintenance run <node> (--plan path | -- <update-command> [args...]) [--timeout duration] [--return-timeout duration] [--json]\n  skepr maintenance run --resume <operation-id> [--retry-command | --accept-command]\n  skepr maintenance run --abort <operation-id>\n", err)
+		report(stderr, "%v\nusage:\n  skepr [--context name] maintenance run <node> [options] -- <update-command> [args...]\n  skepr [--context name] maintenance run <node> [options] --pre-command <argv...> --update-command <argv...> [--verify-command <argv...>]\n  skepr [--context name] maintenance run <node> [options] --plan <path|->\n  skepr maintenance run --resume <operation-id> [--retry-command | --accept-command]\n  skepr maintenance run --abort <operation-id>\noptions must precede command sections; repeat --manager-context or --manager-endpoint for failover\n", err)
 		return ExitInvalidUsage
 	}
 	stateDir, err := operations.DefaultStateDir()
@@ -64,12 +72,18 @@ func runMaintenanceTransaction(ctx context.Context, args []string, contextName s
 		contexts = append(contexts, operation.Run.DockerContexts...)
 		endpoints = append(endpoints, operation.Run.DockerEndpoints...)
 	} else if options.planPath != "" {
-		plan, loadErr := maintenance.LoadPlan(options.planPath)
+		var plan maintenance.Plan
+		var loadErr error
+		if options.planPath == "-" {
+			plan, loadErr = maintenance.LoadPlanReader(stdin)
+		} else {
+			plan, loadErr = maintenance.LoadPlan(options.planPath)
+		}
 		if loadErr != nil {
 			report(stderr, "%v\n", loadErr)
 			return ExitInvalidUsage
 		}
-		if plan.Target.Hostname != options.target {
+		if plan.Target.Hostname != "" && plan.Target.Hostname != options.target {
 			report(stderr, "maintenance plan target %s does not match requested node %s\n", plan.Target.Hostname, options.target)
 			return ExitInvalidUsage
 		}
@@ -77,8 +91,14 @@ func runMaintenanceTransaction(ctx context.Context, args []string, contextName s
 		contexts = append(contexts, plan.Swarm.Contexts...)
 		endpoints = append(endpoints, plan.Swarm.Endpoints...)
 	} else {
-		commands = maintenance.RunCommands{Update: append([]string(nil), options.updateCommand...)}
+		commands = maintenance.RunCommands{
+			Pre:    append([]string(nil), options.preCommand...),
+			Update: append([]string(nil), options.updateCommand...),
+			Verify: append([]string(nil), options.verifyCommand...),
+		}
 	}
+	contexts = append(contexts, options.managerContexts...)
+	endpoints = append(endpoints, options.managerEndpoints...)
 	if contextName != "" {
 		contexts = append([]string{contextName}, contexts...)
 	}
@@ -144,10 +164,43 @@ func parseMaintenanceRunArgs(args []string) (maintenanceRunOptions, error) {
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		if argument == "--" {
+			if options.updateSet || options.dashCommand {
+				return options, fmt.Errorf("update command was provided more than once")
+			}
+			if index+1 >= len(args) {
+				return options, fmt.Errorf("-- requires an update command")
+			}
+			options.dashCommand = true
 			options.updateCommand = append([]string(nil), args[index+1:]...)
 			break
 		}
 		switch {
+		case isMaintenanceRunCommandSection(argument):
+			command, next := maintenanceRunCommandArgs(args, index+1)
+			if len(command) == 0 {
+				return options, fmt.Errorf("%s requires at least one argument", argument)
+			}
+			switch argument {
+			case "--pre-command":
+				if options.preCommandSet {
+					return options, fmt.Errorf("--pre-command was provided more than once")
+				}
+				options.preCommandSet = true
+				options.preCommand = command
+			case "--update-command":
+				if options.updateSet || options.dashCommand {
+					return options, fmt.Errorf("update command was provided more than once")
+				}
+				options.updateSet = true
+				options.updateCommand = command
+			case "--verify-command":
+				if options.verifySet {
+					return options, fmt.Errorf("--verify-command was provided more than once")
+				}
+				options.verifySet = true
+				options.verifyCommand = command
+			}
+			index = next - 1
 		case argument == "--json":
 			options.jsonOutput = true
 		case argument == "--retry-command":
@@ -160,7 +213,7 @@ func parseMaintenanceRunArgs(args []string) (maintenanceRunOptions, error) {
 				return options, fmt.Errorf("command resolution options are mutually exclusive")
 			}
 			options.resolution = maintenance.CommandResolutionAccept
-		case argument == "--plan" || argument == "--resume" || argument == "--abort" || argument == "--timeout" || argument == "--return-timeout":
+		case argument == "--plan" || argument == "--resume" || argument == "--abort" || argument == "--timeout" || argument == "--return-timeout" || argument == "--manager-context" || argument == "--manager-endpoint":
 			if index+1 >= len(args) {
 				return options, fmt.Errorf("%s requires a value", argument)
 			}
@@ -174,6 +227,14 @@ func parseMaintenanceRunArgs(args []string) (maintenanceRunOptions, error) {
 			options.resumeID = strings.TrimPrefix(argument, "--resume=")
 		case strings.HasPrefix(argument, "--abort="):
 			options.abortID = strings.TrimPrefix(argument, "--abort=")
+		case strings.HasPrefix(argument, "--manager-context="):
+			if err := setMaintenanceRunOption(&options, "--manager-context", strings.TrimPrefix(argument, "--manager-context=")); err != nil {
+				return options, err
+			}
+		case strings.HasPrefix(argument, "--manager-endpoint="):
+			if err := setMaintenanceRunOption(&options, "--manager-endpoint", strings.TrimPrefix(argument, "--manager-endpoint=")); err != nil {
+				return options, err
+			}
 		case strings.HasPrefix(argument, "--timeout="):
 			if err := setMaintenanceRunOption(&options, "--timeout", strings.TrimPrefix(argument, "--timeout=")); err != nil {
 				return options, err
@@ -191,13 +252,13 @@ func parseMaintenanceRunArgs(args []string) (maintenanceRunOptions, error) {
 		}
 	}
 	if options.resumeID != "" {
-		if options.target != "" || options.planPath != "" || options.abortID != "" || len(options.updateCommand) > 0 {
+		if options.target != "" || options.planPath != "" || options.abortID != "" || options.hasCommands() || options.hasManagerEndpoints() {
 			return options, fmt.Errorf("--resume cannot be combined with a node, plan or update command")
 		}
 		return options, nil
 	}
 	if options.abortID != "" {
-		if options.target != "" || options.planPath != "" || len(options.updateCommand) > 0 || options.resolution != "" {
+		if options.target != "" || options.planPath != "" || options.hasCommands() || options.hasManagerEndpoints() || options.resolution != "" {
 			return options, fmt.Errorf("--abort cannot be combined with a node, plan, update command or command resolution")
 		}
 		return options, nil
@@ -208,10 +269,44 @@ func parseMaintenanceRunArgs(args []string) (maintenanceRunOptions, error) {
 	if options.target == "" {
 		return options, fmt.Errorf("maintenance run requires a target node")
 	}
-	if (options.planPath == "") == (len(options.updateCommand) == 0) {
-		return options, fmt.Errorf("maintenance run requires exactly one of --plan or -- <update-command>")
+	inlineCommands := options.preCommandSet || options.updateSet || options.verifySet
+	if inlineCommands && !options.updateSet {
+		return options, fmt.Errorf("inline hooks require --update-command")
+	}
+	sources := 0
+	if options.planPath != "" {
+		sources++
+	}
+	if options.dashCommand {
+		sources++
+	}
+	if inlineCommands {
+		sources++
+	}
+	if sources != 1 {
+		return options, fmt.Errorf("maintenance run requires exactly one command source: --plan, -- <update-command> or inline command hooks")
 	}
 	return options, nil
+}
+
+func (o maintenanceRunOptions) hasCommands() bool {
+	return o.dashCommand || o.preCommandSet || o.updateSet || o.verifySet
+}
+
+func (o maintenanceRunOptions) hasManagerEndpoints() bool {
+	return len(o.managerContexts) > 0 || len(o.managerEndpoints) > 0
+}
+
+func isMaintenanceRunCommandSection(argument string) bool {
+	return argument == "--pre-command" || argument == "--update-command" || argument == "--verify-command"
+}
+
+func maintenanceRunCommandArgs(args []string, start int) ([]string, int) {
+	end := start
+	for end < len(args) && !isMaintenanceRunCommandSection(args[end]) {
+		end++
+	}
+	return append([]string(nil), args[start:end]...), end
 }
 
 func setMaintenanceRunOption(options *maintenanceRunOptions, name, value string) error {
@@ -222,6 +317,16 @@ func setMaintenanceRunOption(options *maintenanceRunOptions, name, value string)
 		options.resumeID = value
 	case "--abort":
 		options.abortID = value
+	case "--manager-context":
+		if value == "" {
+			return fmt.Errorf("--manager-context requires a non-empty value")
+		}
+		options.managerContexts = append(options.managerContexts, value)
+	case "--manager-endpoint":
+		if err := maintenance.ValidateManagerEndpoint(value); err != nil {
+			return fmt.Errorf("--manager-endpoint %w", err)
+		}
+		options.managerEndpoints = append(options.managerEndpoints, value)
 	case "--timeout", "--return-timeout":
 		duration, err := time.ParseDuration(value)
 		if err != nil || duration <= 0 {

@@ -20,7 +20,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signalContext(context.Background(), os.Exit)
 	defer stop()
 
-	return cli.Run(ctx, args, skeprdocker.NewConnector(), stdout, stderr)
+	return cli.RunWithInput(ctx, args, skeprdocker.NewConnector(), os.Stdin, stdout, stderr)
 }
 
 func signalContext(parent context.Context, exit func(int)) (context.Context, context.CancelFunc) {

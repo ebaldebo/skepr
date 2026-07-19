@@ -49,3 +49,18 @@ update = ["true"]
 
 	assert.ErrorContains(t, err, "unknown key target.mount")
 }
+
+func TestLoadPlanAllowsCommandOnlyReusablePlan(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "maintenance.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`[commands]
+pre = ["pre-check"]
+update = ["update-host"]
+verify = ["verify-host"]
+`), 0o600))
+
+	plan, err := LoadPlan(path)
+
+	require.NoError(t, err)
+	assert.Empty(t, plan.Target.Hostname)
+	assert.Equal(t, []string{"update-host"}, plan.Commands.Update)
+}

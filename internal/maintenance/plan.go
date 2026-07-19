@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 
@@ -24,6 +25,18 @@ func LoadPlan(path string) (Plan, error) {
 	if err != nil {
 		return Plan{}, fmt.Errorf("read maintenance plan: %w", err)
 	}
+	return decodePlan(data)
+}
+
+func LoadPlanReader(reader io.Reader) (Plan, error) {
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return Plan{}, fmt.Errorf("read maintenance plan: %w", err)
+	}
+	return decodePlan(data)
+}
+
+func decodePlan(data []byte) (Plan, error) {
 	var plan Plan
 	metadata, err := toml.Decode(string(data), &plan)
 	if err != nil {
@@ -39,9 +52,6 @@ func LoadPlan(path string) (Plan, error) {
 }
 
 func (p Plan) Validate() error {
-	if p.Target.Hostname == "" {
-		return fmt.Errorf("maintenance plan target.hostname is required")
-	}
 	if len(p.Commands.Update) == 0 || p.Commands.Update[0] == "" {
 		return fmt.Errorf("maintenance plan commands.update must contain an executable")
 	}
@@ -60,13 +70,20 @@ func (p Plan) Validate() error {
 		}
 	}
 	for _, endpoint := range p.Swarm.Endpoints {
-		parsed, err := url.Parse(endpoint)
-		if err != nil || parsed.Scheme != "ssh" || parsed.Host == "" {
-			return fmt.Errorf("maintenance plan swarm.endpoints contains an unsupported endpoint; expected ssh:// endpoint")
+		if err := ValidateManagerEndpoint(endpoint); err != nil {
+			return fmt.Errorf("maintenance plan swarm.endpoints %w", err)
 		}
-		if _, hasPassword := parsed.User.Password(); hasPassword {
-			return fmt.Errorf("maintenance plan swarm.endpoints must not contain passwords")
-		}
+	}
+	return nil
+}
+
+func ValidateManagerEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "ssh" || parsed.Host == "" {
+		return fmt.Errorf("contains an unsupported endpoint; expected ssh:// endpoint")
+	}
+	if _, hasPassword := parsed.User.Password(); hasPassword {
+		return fmt.Errorf("must not contain passwords")
 	}
 	return nil
 }

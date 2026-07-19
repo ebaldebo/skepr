@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +64,77 @@ verify = ["true"]
 	}
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
 	assert.Equal(t, maintenance.PhaseCompleted, result.Operation.Phase)
+}
+
+func TestMaintenanceRunParsesInlineArgvHooks(t *testing.T) {
+	options, err := parseMaintenanceRunArgs([]string{
+		"worker-1", "--timeout", "2m",
+		"--manager-context", "manager-1",
+		"--manager-context=manager-2",
+		"--manager-endpoint=ssh://root@manager-3",
+		"--pre-command", "ssh", "worker-1", "pre-check",
+		"--update-command", "nixos-rebuild", "switch", "--flake", ".#worker-1",
+		"--verify-command", "ssh", "worker-1", "docker", "info",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "worker-1", options.target)
+	assert.Equal(t, 2*time.Minute, options.timeout)
+	assert.Equal(t, []string{"manager-1", "manager-2"}, options.managerContexts)
+	assert.Equal(t, []string{"ssh://root@manager-3"}, options.managerEndpoints)
+	assert.Equal(t, []string{"ssh", "worker-1", "pre-check"}, options.preCommand)
+	assert.Equal(t, []string{"nixos-rebuild", "switch", "--flake", ".#worker-1"}, options.updateCommand)
+	assert.Equal(t, []string{"ssh", "worker-1", "docker", "info"}, options.verifyCommand)
+}
+
+func TestMaintenanceRunLoadsPlanFromStdin(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var stderr bytes.Buffer
+
+	exitCode := RunWithInput(
+		context.Background(),
+		[]string{"maintenance", "run", "worker-1", "--plan", "-"},
+		maintenanceConnectorError{},
+		strings.NewReader("[target]\nhostname = \"other-worker\"\n\n[commands]\nupdate = [\"true\"]\n"),
+		&bytes.Buffer{},
+		&stderr,
+	)
+
+	assert.Equal(t, ExitInvalidUsage, exitCode)
+	assert.Contains(t, stderr.String(), "maintenance plan target other-worker does not match requested node worker-1")
+}
+
+func TestMaintenanceRunExecutesInlineArgvHooks(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	initial := healthyMaintenanceInventory()
+	initial.DesiredTasks = nil
+	drained := initial
+	drained.Nodes = append([]status.Node(nil), initial.Nodes...)
+	drained.Nodes[1].Availability = "drain"
+	connection := &maintenanceConnection{inventories: []status.Result{
+		initial, initial, initial, initial, drained, drained, drained, drained, initial,
+	}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(context.Background(), []string{
+		"maintenance", "run", "worker-1", "--json",
+		"--pre-command", "true",
+		"--update-command", "true",
+		"--verify-command", "true",
+	}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	require.Equal(t, ExitSuccess, exitCode, stderr.String())
+	var result struct {
+		Operation maintenance.Operation `json:"operation"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	require.NotNil(t, result.Operation.Run)
+	require.Len(t, result.Operation.Run.CommandAttempts, 3)
+	assert.Equal(t, "pre", result.Operation.Run.CommandAttempts[0].Hook)
+	assert.Equal(t, "update", result.Operation.Run.CommandAttempts[1].Hook)
+	assert.Equal(t, "verify", result.Operation.Run.CommandAttempts[2].Hook)
 }
 
 func TestMaintenanceRunUpdateFailureStaysDrainedAndResumes(t *testing.T) {

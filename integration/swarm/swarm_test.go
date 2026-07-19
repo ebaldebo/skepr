@@ -123,7 +123,8 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	var runOutput bytes.Buffer
 	var runErrors bytes.Buffer
 	exitCode = cli.Run(context.Background(), []string{
-		"maintenance", "run", "worker-1", "--timeout", "30s", "--return-timeout", "30s", "--json", "--", "true",
+		"maintenance", "run", "worker-1", "--timeout", "30s", "--return-timeout", "30s", "--json",
+		"--pre-command", "true", "--update-command", "true", "--verify-command", "true",
 	}, connector, &runOutput, &runErrors)
 	require.Equal(t, cli.ExitSuccess, exitCode, runErrors.String())
 	var runResult struct {
@@ -134,8 +135,10 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, maintenance.PhaseCompleted, runResult.Operation.Phase)
 	require.NotNil(t, runResult.Operation.Run)
 	assert.Equal(t, maintenance.RunPhaseCompleted, runResult.Operation.Run.Phase)
-	require.Len(t, runResult.Operation.Run.CommandAttempts, 1)
-	assert.Equal(t, "update", runResult.Operation.Run.CommandAttempts[0].Hook)
+	require.Len(t, runResult.Operation.Run.CommandAttempts, 3)
+	assert.Equal(t, "pre", runResult.Operation.Run.CommandAttempts[0].Hook)
+	assert.Equal(t, "update", runResult.Operation.Run.CommandAttempts[1].Hook)
+	assert.Equal(t, "verify", runResult.Operation.Run.CommandAttempts[2].Hook)
 	persisted, err = store.Load(runResult.Operation.ID)
 	require.NoError(t, err)
 	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
