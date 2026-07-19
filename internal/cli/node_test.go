@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/ebaldebo/skepr/internal/status"
@@ -165,14 +166,135 @@ func TestNodeDrainDryRunJSONOutput(t *testing.T) {
 }`, stdout.String())
 }
 
-func TestNodeDrainRequiresDryRunUntilMutationIsImplemented(t *testing.T) {
+func TestNodeDrainRejectsInvalidTimeoutBeforeConnecting(t *testing.T) {
 	t.Parallel()
 
 	connector := &fakeConnector{}
 	var stderr bytes.Buffer
-	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1"}, connector, &bytes.Buffer{}, &stderr)
+	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1", "--timeout", "0s"}, connector, &bytes.Buffer{}, &stderr)
 
 	assert.Equal(t, ExitInvalidUsage, exitCode)
 	assert.Empty(t, connector.contextName)
-	assert.Equal(t, "usage: skepr [--context name] node drain <node> --dry-run [--json]\n", stderr.String())
+	assert.Equal(t, "usage: skepr [--context name] node drain <node> [--dry-run] [--timeout duration] [--json]\n", stderr.String())
+}
+
+func TestNodeDrainDrainsAndWaitsForConvergence(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	initial := healthyNodeDrainInventory()
+	drained := healthyNodeDrainInventory()
+	drained.Nodes[1].Availability = "drain"
+	drained.DesiredTasks = nil
+	drained.Tasks = nil
+	connection := &nodeDrainConnection{inventories: []status.Result{initial, initial, drained, drained}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1", "--timeout", "1s"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, []nodeAvailabilityUpdate{{nodeID: "w1", availability: "drain"}}, connection.updates)
+	assert.Equal(t, 4, connection.inspectCalls)
+	assert.Equal(t, `DRAINED: worker-1
+Target: worker-1 (w1)
+Availability: drain
+Replicated tasks moved: 1
+Global tasks stopped: 0
+Affected services converged: 1
+`, stdout.String())
+}
+
+func TestNodeDrainJSONOutput(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	initial := healthyNodeDrainInventory()
+	drained := healthyNodeDrainInventory()
+	drained.Nodes[1].Availability = "drain"
+	drained.DesiredTasks = nil
+	drained.Tasks = nil
+	connection := &nodeDrainConnection{inventories: []status.Result{initial, initial, drained, drained}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1", "--timeout", "1s", "--json"}, &fakeConnector{connection: connection}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.JSONEq(t, `{
+  "schema_version": 1,
+  "endpoint": "unix:///var/run/docker.sock",
+  "cluster_id": "cluster-1",
+  "target": {
+    "id": "w1",
+    "hostname": "worker-1",
+    "role": "worker",
+    "state": "ready",
+    "availability": "drain"
+  },
+  "phase": "drained",
+  "mutation_occurred": true,
+  "availability": "drain",
+  "replicated_tasks_moved": 1,
+  "global_tasks_stopped": 0,
+  "affected_services": [
+    {"id": "s1", "name": "api", "mode": "replicated"}
+  ],
+  "evacuated": true,
+  "services_converged": true
+}`, stdout.String())
+}
+
+func TestNodeDrainUpdateFailureRequiresRecovery(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	initial := healthyNodeDrainInventory()
+	connection := &nodeDrainConnection{inventories: []status.Result{initial, initial}, updateErr: fmt.Errorf("manager lost the update response")}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1", "--timeout", "1s"}, &fakeConnector{connection: connection}, &stdout, &stderr)
+
+	assert.Equal(t, ExitPartialMutation, exitCode)
+	assert.Empty(t, stdout.String())
+	assert.Equal(t, []nodeAvailabilityUpdate{{nodeID: "w1", availability: "drain"}}, connection.updates)
+	assert.Contains(t, stderr.String(), "node drain failed: request drain for target node worker-1: manager lost the update response")
+	assert.Contains(t, stderr.String(), "RECOVERY: node worker-1 may remain drained; inspect live state before activating it")
+}
+
+type nodeDrainConnection struct {
+	inventories  []status.Result
+	inspectCalls int
+	updates      []nodeAvailabilityUpdate
+	updateErr    error
+}
+
+type nodeAvailabilityUpdate struct {
+	nodeID       string
+	availability string
+}
+
+func (c *nodeDrainConnection) Inspect(context.Context) (status.Result, error) {
+	if c.inspectCalls >= len(c.inventories) {
+		return status.Result{}, fmt.Errorf("unexpected inspect call %d", c.inspectCalls+1)
+	}
+	result := c.inventories[c.inspectCalls]
+	c.inspectCalls++
+	return result, nil
+}
+
+func (c *nodeDrainConnection) UpdateNodeAvailability(_ context.Context, nodeID, availability string) error {
+	c.updates = append(c.updates, nodeAvailabilityUpdate{nodeID: nodeID, availability: availability})
+	return c.updateErr
+}
+
+func (c *nodeDrainConnection) Close() error { return nil }
+
+func healthyNodeDrainInventory() status.Result {
+	task := status.Task{ID: "t1", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"}
+	return status.Result{
+		Endpoint: "unix:///var/run/docker.sock",
+		Cluster:  status.Cluster{ID: "cluster-1", LocalState: "active", ControlAvailable: true},
+		Nodes: []status.Node{
+			{ID: "m1", Hostname: "manager-1", Role: "manager", State: "ready", Availability: "active", ManagerStatus: "leader"},
+			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active"},
+			{ID: "w2", Hostname: "worker-2", Role: "worker", State: "ready", Availability: "active"},
+		},
+		Services:     []status.Service{{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 1, DesiredTasks: 1, Converged: true}},
+		DesiredTasks: []status.Task{task},
+		Tasks:        []status.Task{task},
+	}
 }

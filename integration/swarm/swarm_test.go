@@ -95,6 +95,26 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Empty(t, preview.GlobalTasks)
 	assert.Empty(t, preview.ServiceImpacts)
 
+	var drainOutput bytes.Buffer
+	var drainErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"node", "drain", "worker-1", "--timeout", "30s", "--json"}, connector, &drainOutput, &drainErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, drainErrors.String())
+	var drainResult drain.Result
+	require.NoError(t, json.Unmarshal(drainOutput.Bytes(), &drainResult))
+	assert.Equal(t, drain.ResultSchemaVersion, drainResult.SchemaVersion)
+	assert.Equal(t, drain.PhaseDrained, drainResult.Phase)
+	assert.Equal(t, "worker-1", drainResult.Target.Hostname)
+	assert.Equal(t, "drain", drainResult.Availability)
+	assert.True(t, drainResult.Evacuated)
+	assert.True(t, drainResult.ServicesConverged)
+
+	restoreConnection, err := connector.Connect(context.Background(), "")
+	require.NoError(t, err)
+	restoreClient, ok := restoreConnection.(status.MaintenanceConnection)
+	require.True(t, ok)
+	require.NoError(t, restoreClient.UpdateNodeAvailability(context.Background(), drainResult.Target.ID, "active"))
+	require.NoError(t, restoreConnection.Close())
+
 	var beginOutput bytes.Buffer
 	var beginErrors bytes.Buffer
 	exitCode = cli.Run(context.Background(), []string{"maintenance", "begin", "worker-1", "--timeout", "30s"}, connector, &beginOutput, &beginErrors)

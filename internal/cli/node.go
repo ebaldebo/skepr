@@ -3,19 +3,22 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/ebaldebo/skepr/internal/drain"
+	"github.com/ebaldebo/skepr/internal/operations"
 	"github.com/ebaldebo/skepr/internal/preflight"
 	"github.com/ebaldebo/skepr/internal/status"
 )
 
 func runNode(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "drain" {
-		report(stderr, "usage: skepr [--context name] node drain <node> --dry-run [--json]\n")
+		report(stderr, "usage: skepr [--context name] node drain <node> [--dry-run] [--timeout duration] [--json]\n")
 		return ExitInvalidUsage
 	}
 	return runNodeDrain(ctx, args[1:], contextName, connector, stdout, stderr)
@@ -26,9 +29,10 @@ func runNodeDrain(ctx context.Context, args []string, contextName string, connec
 	flags.SetOutput(stderr)
 	dryRun := flags.Bool("dry-run", false, "preview drain impact without changing the node")
 	jsonOutput := flags.Bool("json", false, "emit JSON output")
-	if err := flags.Parse(normalizeNodeDrainArgs(args)); err != nil || flags.NArg() != 1 || !*dryRun {
+	timeout := flags.Duration("timeout", 5*time.Minute, "node drain timeout")
+	if err := flags.Parse(normalizeNodeDrainArgs(args)); err != nil || flags.NArg() != 1 || *timeout <= 0 {
 		if err == nil {
-			report(stderr, "usage: skepr [--context name] node drain <node> --dry-run [--json]\n")
+			report(stderr, "usage: skepr [--context name] node drain <node> [--dry-run] [--timeout duration] [--json]\n")
 		}
 		return ExitInvalidUsage
 	}
@@ -39,42 +43,142 @@ func runNodeDrain(ctx context.Context, args []string, contextName string, connec
 		return ExitDockerConnection
 	}
 	defer func() { _ = connection.Close() }()
-	inventory, err := connection.Inspect(ctx)
-	if err != nil {
-		report(stderr, "inspect Docker Swarm: %v\n", err)
-		return ExitDockerConnection
-	}
-	preview := drain.BuildPreview(inventory, flags.Arg(0))
-	if *jsonOutput {
-		encoder := json.NewEncoder(stdout)
-		encoder.SetEscapeHTML(false)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(preview); err != nil {
+	if *dryRun {
+		inventory, err := connection.Inspect(ctx)
+		if err != nil {
+			report(stderr, "inspect Docker Swarm: %v\n", err)
+			return ExitDockerConnection
+		}
+		preview := drain.BuildPreview(inventory, flags.Arg(0))
+		if err := writeNodeJSONOrHuman(*jsonOutput, stdout, preview, writeDrainPreview); err != nil {
 			report(stderr, "write node drain preview output: %v\n", err)
 			return ExitDockerConnection
 		}
-	} else if err := writeDrainPreview(stdout, preview); err != nil {
-		report(stderr, "write node drain preview output: %v\n", err)
+		if !preview.SafeToDrain {
+			return ExitSafetyGate
+		}
+		return ExitSuccess
+	}
+	maintenanceConnection, ok := connection.(status.MaintenanceConnection)
+	if !ok {
+		report(stderr, "Docker connection does not support Swarm node updates\n")
 		return ExitDockerConnection
 	}
-	if !preview.SafeToDrain {
-		return ExitSafetyGate
+	stateDir, err := operations.DefaultStateDir()
+	if err != nil {
+		report(stderr, "configure node drain state: %v\n", err)
+		return ExitInvalidUsage
+	}
+	drainer := drain.Drainer{
+		Client:  maintenanceConnection,
+		Guard:   nodeDrainGuard{store: operations.NewStore(stateDir)},
+		Timeout: *timeout,
+		Progress: func(result drain.Result) {
+			_, _ = fmt.Fprintf(stderr, "node drain %s: %s\n", result.Target.Hostname, result.Phase)
+		},
+	}
+	result, err := drainer.Drain(ctx, flags.Arg(0))
+	if err != nil {
+		return reportNodeDrainError(err, *jsonOutput, stdout, stderr)
+	}
+	if err := writeNodeJSONOrHuman(*jsonOutput, stdout, result, writeNodeDrainResult); err != nil {
+		report(stderr, "write node drain output: %v\n", err)
+		return ExitDockerConnection
 	}
 	return ExitSuccess
+}
+
+type nodeDrainGuard struct {
+	store *operations.Store
+}
+
+func (g nodeDrainGuard) AcquireClusterLock(clusterID string) (func() error, error) {
+	lock, err := g.store.AcquireClusterLock(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	return lock.Release, nil
+}
+
+func (g nodeDrainGuard) EnsureNoActiveOperation(clusterID string) error {
+	return g.store.EnsureNoActiveOperation(clusterID)
 }
 
 func normalizeNodeDrainArgs(args []string) []string {
 	flagArgs := make([]string, 0, len(args))
 	positional := make([]string, 0, 1)
-	for _, arg := range args {
-		switch arg {
+	for index := 0; index < len(args); index++ {
+		switch arg := args[index]; arg {
 		case "--dry-run", "--json":
 			flagArgs = append(flagArgs, arg)
+		case "--timeout":
+			flagArgs = append(flagArgs, arg)
+			if index+1 < len(args) {
+				index++
+				flagArgs = append(flagArgs, args[index])
+			}
 		default:
-			positional = append(positional, arg)
+			if strings.HasPrefix(arg, "--timeout=") {
+				flagArgs = append(flagArgs, arg)
+			} else {
+				positional = append(positional, arg)
+			}
 		}
 	}
 	return append(flagArgs, positional...)
+}
+
+func reportNodeDrainError(err error, jsonOutput bool, stdout, stderr io.Writer) int {
+	var safetyError *drain.SafetyError
+	if errors.As(err, &safetyError) {
+		if outputErr := writeNodeJSONOrHuman(jsonOutput, stdout, safetyError.Preview, writeDrainPreview); outputErr != nil {
+			report(stderr, "write node drain safety output: %v\n", outputErr)
+			return ExitDockerConnection
+		}
+		return ExitSafetyGate
+	}
+	var validationError *drain.ValidationError
+	if errors.As(err, &validationError) {
+		report(stderr, "node drain blocked: %v\n", validationError)
+		return ExitSafetyGate
+	}
+	var mutationError *drain.MutationError
+	if errors.As(err, &mutationError) {
+		report(stderr, "node drain failed: %v\n", mutationError.Err)
+		report(stderr, "RECOVERY: node %s may remain drained; inspect live state before activating it\n", mutationError.Result.Target.Hostname)
+		return ExitPartialMutation
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		report(stderr, "node drain stopped before mutation: %v\n", err)
+		return ExitTimeout
+	}
+	report(stderr, "node drain failed before mutation: %v\n", err)
+	return ExitDockerConnection
+}
+
+func writeNodeJSONOrHuman[T any](jsonOutput bool, writer io.Writer, result T, writeHuman func(io.Writer, T) error) error {
+	if !jsonOutput {
+		return writeHuman(writer, result)
+	}
+	encoder := json.NewEncoder(writer)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(result)
+}
+
+func writeNodeDrainResult(writer io.Writer, result drain.Result) error {
+	_, err := fmt.Fprintf(
+		writer,
+		"DRAINED: %s\nTarget: %s (%s)\nAvailability: %s\nReplicated tasks moved: %d\nGlobal tasks stopped: %d\nAffected services converged: %d\n",
+		result.Target.Hostname,
+		result.Target.Hostname,
+		result.Target.ID,
+		result.Availability,
+		result.ReplicatedTasksMoved,
+		result.GlobalTasksStopped,
+		len(result.AffectedServices),
+	)
+	return err
 }
 
 func writeDrainPreview(writer io.Writer, preview drain.Preview) error {
