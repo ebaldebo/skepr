@@ -38,7 +38,7 @@ func (s *Store) ActiveForCluster(clusterID string) (*Record, error) {
 		if err != nil {
 			return nil, err
 		}
-		if record.ClusterID == clusterID && !record.Terminal() {
+		if record.ClusterID == clusterID && record.Phase != maintenance.PhaseCompleted {
 			return &record, nil
 		}
 	}
@@ -78,7 +78,7 @@ func (s *Store) LatestActive() (*Record, error) {
 		if err != nil {
 			return nil, err
 		}
-		if record.Terminal() {
+		if record.Phase == maintenance.PhaseCompleted {
 			continue
 		}
 		if latest == nil || record.UpdatedAt.After(latest.UpdatedAt) || record.UpdatedAt.Equal(latest.UpdatedAt) && record.ID > latest.ID {

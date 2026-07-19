@@ -3,7 +3,6 @@ package docker
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 
@@ -55,36 +54,6 @@ func (c *Connector) Connect(_ context.Context, explicitContext string) (status.C
 	inspector := newInspectorAt(dockerClient, endpoint)
 	inspector.close = dockerClient.Close
 	return inspector, nil
-}
-
-func (c *Connector) ConnectEndpoint(_ context.Context, rawEndpoint string) (status.Connection, error) {
-	parsed, err := url.Parse(rawEndpoint)
-	if err != nil || parsed.Scheme != "ssh" || parsed.Host == "" {
-		return nil, fmt.Errorf("unsupported raw Docker endpoint: expected ssh:// endpoint")
-	}
-	if _, hasPassword := parsed.User.Password(); hasPassword {
-		return nil, fmt.Errorf("raw Docker SSH endpoint must not contain a password")
-	}
-	endpoint := contextdocker.Endpoint{EndpointMeta: contextdocker.EndpointMeta{Host: rawEndpoint}}
-	options, err := endpoint.ClientOpts()
-	if err != nil {
-		return nil, fmt.Errorf("configure raw Docker endpoint %q: %w", sanitizedSSHEndpoint(parsed), err)
-	}
-	dockerClient, err := client.New(options...)
-	if err != nil {
-		return nil, fmt.Errorf("create Docker client for raw endpoint %q: %w", sanitizedSSHEndpoint(parsed), err)
-	}
-	inspector := newInspectorAt(dockerClient, rawEndpoint)
-	inspector.close = dockerClient.Close
-	return inspector, nil
-}
-
-func sanitizedSSHEndpoint(parsed *url.URL) string {
-	sanitized := *parsed
-	if parsed.User != nil {
-		sanitized.User = url.User(parsed.User.Username())
-	}
-	return sanitized.String()
 }
 
 type resolvedContext struct {

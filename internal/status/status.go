@@ -77,7 +77,3 @@ type ReconciliationConnection interface {
 type Connector interface {
 	Connect(context.Context, string) (Connection, error)
 }
-
-type EndpointConnector interface {
-	ConnectEndpoint(context.Context, string) (Connection, error)
-}

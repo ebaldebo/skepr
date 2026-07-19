@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -28,10 +27,6 @@ const (
 )
 
 func Run(ctx context.Context, args []string, connector status.Connector, stdout, stderr io.Writer) int {
-	return RunWithInput(ctx, args, connector, os.Stdin, stdout, stderr)
-}
-
-func RunWithInput(ctx context.Context, args []string, connector status.Connector, stdin io.Reader, stdout, stderr io.Writer) int {
 	globalFlags := flag.NewFlagSet("skepr", flag.ContinueOnError)
 	globalFlags.SetOutput(stderr)
 	contextName := globalFlags.String("context", "", "Docker context to use")
@@ -50,14 +45,14 @@ func RunWithInput(ctx context.Context, args []string, connector status.Connector
 	case "check":
 		return runCheck(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "maintenance":
-		return runMaintenance(ctx, args[1:], *contextName, connector, stdin, stdout, stderr)
+		return runMaintenance(ctx, args[1:], *contextName, connector, stdout, stderr)
 	default:
 		report(stderr, "usage: skepr [--context name] <command>\n")
 		return ExitInvalidUsage
 	}
 }
 
-func runMaintenance(ctx context.Context, args []string, contextName string, connector status.Connector, stdin io.Reader, stdout, stderr io.Writer) int {
+func runMaintenance(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		report(stderr, "usage: skepr [--context name] maintenance <command>\n")
 		return ExitInvalidUsage
@@ -65,8 +60,6 @@ func runMaintenance(ctx context.Context, args []string, contextName string, conn
 	switch args[0] {
 	case "begin":
 		return runMaintenanceBegin(ctx, args[1:], contextName, connector, stdout, stderr)
-	case "run":
-		return runMaintenanceTransaction(ctx, args[1:], contextName, connector, stdin, stdout, stderr)
 	case "finish":
 		return runMaintenanceFinish(ctx, args[1:], contextName, connector, stdout, stderr)
 	case "reconcile":
@@ -329,16 +322,6 @@ func writeMaintenanceShow(writer io.Writer, result maintenance.ShowResult) error
 	if result.Operation.LastError != "" {
 		if _, err := fmt.Fprintf(writer, "Last error: %s\n", result.Operation.LastError); err != nil {
 			return err
-		}
-	}
-	if result.Operation.Run != nil {
-		if _, err := fmt.Fprintf(writer, "Run phase: %s\n", result.Operation.Run.Phase); err != nil {
-			return err
-		}
-		if !result.Operation.Terminal() {
-			if _, err := fmt.Fprintf(writer, "Resume: skepr maintenance run --resume %s\n", result.Operation.ID); err != nil {
-				return err
-			}
 		}
 	}
 	if result.LiveError != "" {

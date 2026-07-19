@@ -3,7 +3,6 @@ module github.com/ebaldebo/skepr
 go 1.26
 
 require (
-	github.com/BurntSushi/toml v1.6.0
 	github.com/docker/cli v29.6.1+incompatible
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.0

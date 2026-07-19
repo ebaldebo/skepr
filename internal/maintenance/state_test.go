@@ -16,10 +16,7 @@ func TestValidateTransition(t *testing.T) {
 		wantErr string
 	}{
 		{name: "created to preflight passed", current: PhaseCreated, next: PhasePreflightPassed},
-		{name: "created to aborted", current: PhaseCreated, next: PhaseAborted},
 		{name: "preflight passed to draining", current: PhasePreflightPassed, next: PhaseDraining},
-		{name: "preflight passed to aborted", current: PhasePreflightPassed, next: PhaseAborted},
-		{name: "draining without mutation to aborted", current: PhaseDraining, next: PhaseAborted},
 		{name: "draining to evacuating", current: PhaseDraining, next: PhaseEvacuating},
 		{name: "evacuating to waiting services", current: PhaseEvacuating, next: PhaseWaitingServices},
 		{name: "waiting services to maintenance ready", current: PhaseWaitingServices, next: PhaseMaintenanceReady},
@@ -33,7 +30,6 @@ func TestValidateTransition(t *testing.T) {
 		{name: "cannot skip evacuation", current: PhaseDraining, next: PhaseWaitingServices, wantErr: "invalid maintenance phase transition from draining to waiting-services"},
 		{name: "cannot activate before return verification", current: PhaseMaintenanceReady, next: PhaseActivating, wantErr: "invalid maintenance phase transition from maintenance-ready to activating"},
 		{name: "completed is terminal", current: PhaseCompleted, next: PhaseCreated, wantErr: "invalid maintenance phase transition from completed to created"},
-		{name: "aborted is terminal", current: PhaseAborted, next: PhaseCreated, wantErr: "invalid maintenance phase transition from aborted to created"},
 		{name: "unknown current phase", current: Phase("unknown"), next: PhaseCreated, wantErr: "invalid maintenance phase transition from unknown to created"},
 		{name: "unknown next phase", current: PhaseCreated, next: Phase("unknown"), wantErr: "invalid maintenance phase transition from created to unknown"},
 	}

@@ -68,9 +68,6 @@ func (f Finisher) Finish(ctx context.Context, operationID string) (Operation, er
 	if err != nil {
 		return Operation{}, fmt.Errorf("reload maintenance operation %s: %w", operationID, err)
 	}
-	if operation.Run != nil && operation.Phase == PhaseMaintenanceReady && operation.Run.Phase != RunPhaseVerifyCompleted && operation.Run.Phase != RunPhaseCompleted {
-		return operation, &FinishSafetyError{Err: fmt.Errorf("maintenance run operation %s has not completed verification", operation.ID)}
-	}
 	switch operation.Phase {
 	case PhaseMaintenanceReady, PhaseVerifyingReturn, PhaseActivating, PhaseVerifyingCluster:
 	default:
