@@ -297,8 +297,9 @@ Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
 Required host ports: none
+Storage portability warnings: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, storage
+Other inputs not evaluated: generic resources
 `, stdout.String())
 }
 
@@ -310,7 +311,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
 
 	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.JSONEq(t, `{
-  "schema_version": 7,
+  "schema_version": 8,
   "health": "degraded",
   "service": {
     "id": "s2",
@@ -350,11 +351,11 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
       "platform_requirements",
       "cpu_memory_reservations",
       "maximum_replicas_per_node",
-      "host_published_port_conflicts"
+      "host_published_port_conflicts",
+      "storage_portability_warnings"
     ],
     "unevaluated_inputs": [
-      "generic_resources",
-      "storage_portability"
+      "generic_resources"
     ],
     "evaluated_constraints": [],
     "unevaluated_constraints": [],
@@ -365,6 +366,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
     },
     "max_replicas_per_node": 0,
     "required_host_ports": [],
+    "storage_portability_warnings": [],
     "nodes": [
       {
         "id": "m1",
@@ -421,8 +423,9 @@ Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
 Required host ports: none
+Storage portability warnings: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, storage
+Other inputs not evaluated: generic resources
 `, stdout.String())
 }
 
@@ -460,8 +463,9 @@ Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
 Required host ports: none
+Storage portability warnings: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, storage
+Other inputs not evaluated: generic resources
 `, stdout.String())
 
 	stdout.Reset()
@@ -514,8 +518,9 @@ Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
 Required host ports: none
+Storage portability warnings: none
 Unevaluated constraints: engine.labels.storage==ssd
-Other inputs not evaluated: generic resources, storage
+Other inputs not evaluated: generic resources
 `, stdout.String())
 }
 
@@ -591,8 +596,9 @@ Required platforms: linux/amd64
 Required resources: none
 Maximum replicas per node: unlimited
 Required host ports: none
+Storage portability warnings: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, storage
+Other inputs not evaluated: generic resources
 `, stdout.String())
 
 	stdout.Reset()
@@ -647,8 +653,9 @@ Required platforms: any
 Required resources: 2 CPUs, 2 GiB memory
 Maximum replicas per node: unlimited
 Required host ports: none
+Storage portability warnings: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, storage
+Other inputs not evaluated: generic resources
 `, stdout.String())
 
 	stdout.Reset()
@@ -735,8 +742,9 @@ Required platforms: any
 Required resources: none
 Maximum replicas per node: 1
 Required host ports: none
+Storage portability warnings: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, storage
+Other inputs not evaluated: generic resources
 `, stdout.String())
 
 	stdout.Reset()
@@ -790,8 +798,9 @@ Required platforms: any
 Required resources: none
 Maximum replicas per node: unlimited
 Required host ports: 5353/udp, 8080/tcp
+Storage portability warnings: none
 Unevaluated constraints: none
-Other inputs not evaluated: generic resources, storage
+Other inputs not evaluated: generic resources
 `, stdout.String())
 
 	stdout.Reset()
@@ -806,6 +815,60 @@ Other inputs not evaluated: generic resources, storage
 	assert.Equal(t, "host_port_conflict", diagnosis.PlacementEligibility.Nodes[1].Blockers[0].Code)
 	assert.Empty(t, diagnosis.PlacementEligibility.Nodes[2].UsedHostPorts)
 	assert.True(t, diagnosis.PlacementEligibility.Nodes[2].PassesEvaluatedChecks)
+}
+
+func TestServiceDiagnoseReportsStoragePortabilityWarnings(t *testing.T) {
+	t.Parallel()
+
+	connector := &fakeConnector{connection: resultInspector{result: status.Result{
+		Nodes: []status.Node{{ID: "w1", Hostname: "worker-1", State: "ready", Availability: "active"}},
+		Services: []status.Service{{
+			ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 1, DesiredTasks: 1, Converged: true,
+			StorageMounts: []status.StorageMount{
+				{Type: "volume", Source: "app-data", Target: "/var/lib/app", NodeLocal: true},
+				{Type: "bind", Source: "/srv/config", Target: "/config"},
+				{Type: "volume", Source: "shared-data", Target: "/shared"},
+			},
+		}},
+	}}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "api"}, connector, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, `HEALTHY service api
+Mode: replicated
+Tasks: 1/1 running
+
+Current failures: none
+
+Recent terminal tasks: none
+
+Placement eligibility:
+  worker-1  passes evaluated checks
+Evaluated constraints: none
+Required platforms: any
+Required resources: none
+Maximum replicas per node: unlimited
+Required host ports: none
+Storage portability warnings:
+  bind mount /srv/config -> /config may not be portable across nodes
+  volume app-data -> /var/lib/app uses node-local storage
+Unevaluated constraints: none
+Other inputs not evaluated: generic resources
+`, stdout.String())
+
+	stdout.Reset()
+	exitCode = Run(context.Background(), []string{"service", "diagnose", "api", "--json"}, connector, &stdout, &bytes.Buffer{})
+	assert.Equal(t, ExitSuccess, exitCode)
+	var diagnosis status.ServiceDiagnosis
+	assert.NoError(t, json.Unmarshal(stdout.Bytes(), &diagnosis))
+	assert.Equal(t, status.HealthHealthy, diagnosis.Health)
+	assert.Equal(t, []status.StorageWarning{
+		{Code: "bind_mount", Source: "/srv/config", Target: "/config", Message: "bind mount /srv/config -> /config may not be portable across nodes"},
+		{Code: "node_local_volume", Source: "app-data", Target: "/var/lib/app", Message: "volume app-data -> /var/lib/app uses node-local storage"},
+	}, diagnosis.PlacementEligibility.StoragePortabilityWarnings)
+	assert.True(t, diagnosis.PlacementEligibility.Nodes[0].PassesEvaluatedChecks)
+	assert.Empty(t, diagnosis.PlacementEligibility.Nodes[0].Blockers)
 }
 
 func TestAssessHealthEvaluatesNodeAndManagerHealth(t *testing.T) {

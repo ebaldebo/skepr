@@ -12,11 +12,25 @@ import (
 
 const SchemaVersion = 1
 const HealthSchemaVersion = 2
-const ServiceDiagnosisSchemaVersion = 7
+const ServiceDiagnosisSchemaVersion = 8
 
 type HostPort struct {
 	Protocol      string `json:"protocol"`
 	PublishedPort uint32 `json:"published_port"`
+}
+
+type StorageMount struct {
+	Type      string
+	Source    string
+	Target    string
+	NodeLocal bool
+}
+
+type StorageWarning struct {
+	Code    string `json:"code"`
+	Source  string `json:"source"`
+	Target  string `json:"target"`
+	Message string `json:"message"`
 }
 
 func (p HostPort) String() string {
@@ -79,18 +93,19 @@ type Node struct {
 }
 
 type Service struct {
-	ID                   string     `json:"id"`
-	Name                 string     `json:"name"`
-	Mode                 string     `json:"mode"`
-	RunningTasks         uint64     `json:"running_tasks"`
-	DesiredTasks         uint64     `json:"desired_tasks"`
-	Converged            bool       `json:"converged"`
-	ForceUpdate          uint64     `json:"-"`
-	PlacementConstraints []string   `json:"-"`
-	RequiredPlatforms    []Platform `json:"-"`
-	Reservations         Resources  `json:"-"`
-	MaxReplicasPerNode   uint64     `json:"-"`
-	HostPorts            []HostPort `json:"-"`
+	ID                   string         `json:"id"`
+	Name                 string         `json:"name"`
+	Mode                 string         `json:"mode"`
+	RunningTasks         uint64         `json:"running_tasks"`
+	DesiredTasks         uint64         `json:"desired_tasks"`
+	Converged            bool           `json:"converged"`
+	ForceUpdate          uint64         `json:"-"`
+	PlacementConstraints []string       `json:"-"`
+	RequiredPlatforms    []Platform     `json:"-"`
+	Reservations         Resources      `json:"-"`
+	MaxReplicasPerNode   uint64         `json:"-"`
+	HostPorts            []HostPort     `json:"-"`
+	StorageMounts        []StorageMount `json:"-"`
 }
 
 type Task struct {
@@ -171,15 +186,16 @@ type ServiceDiagnosis struct {
 }
 
 type PlacementEligibility struct {
-	EvaluatedInputs        []string                   `json:"evaluated_inputs"`
-	UnevaluatedInputs      []string                   `json:"unevaluated_inputs"`
-	EvaluatedConstraints   []string                   `json:"evaluated_constraints"`
-	UnevaluatedConstraints []string                   `json:"unevaluated_constraints"`
-	RequiredPlatforms      []Platform                 `json:"required_platforms"`
-	RequiredResources      Resources                  `json:"required_resources"`
-	MaxReplicasPerNode     uint64                     `json:"max_replicas_per_node"`
-	RequiredHostPorts      []HostPort                 `json:"required_host_ports"`
-	Nodes                  []NodePlacementEligibility `json:"nodes"`
+	EvaluatedInputs            []string                   `json:"evaluated_inputs"`
+	UnevaluatedInputs          []string                   `json:"unevaluated_inputs"`
+	EvaluatedConstraints       []string                   `json:"evaluated_constraints"`
+	UnevaluatedConstraints     []string                   `json:"unevaluated_constraints"`
+	RequiredPlatforms          []Platform                 `json:"required_platforms"`
+	RequiredResources          Resources                  `json:"required_resources"`
+	MaxReplicasPerNode         uint64                     `json:"max_replicas_per_node"`
+	RequiredHostPorts          []HostPort                 `json:"required_host_ports"`
+	StoragePortabilityWarnings []StorageWarning           `json:"storage_portability_warnings"`
+	Nodes                      []NodePlacementEligibility `json:"nodes"`
 }
 
 type NodePlacementEligibility struct {
@@ -256,20 +272,22 @@ type placementConstraint struct {
 func assessNodePlacement(inventory Result, service Service) PlacementEligibility {
 	supportedConstraints, unevaluatedConstraints := parsePlacementConstraints(service.PlacementConstraints)
 	requiredHostPorts := canonicalHostPorts(service.HostPorts)
+	storageWarnings := storagePortabilityWarnings(service.StorageMounts)
 	evaluatedConstraints := make([]string, 0, len(supportedConstraints))
 	for _, constraint := range supportedConstraints {
 		evaluatedConstraints = append(evaluatedConstraints, constraint.raw)
 	}
 	eligibility := PlacementEligibility{
-		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations", "maximum_replicas_per_node", "host_published_port_conflicts"},
-		UnevaluatedInputs:      []string{"generic_resources", "storage_portability"},
-		EvaluatedConstraints:   evaluatedConstraints,
-		UnevaluatedConstraints: unevaluatedConstraints,
-		RequiredPlatforms:      append([]Platform{}, service.RequiredPlatforms...),
-		RequiredResources:      service.Reservations,
-		MaxReplicasPerNode:     service.MaxReplicasPerNode,
-		RequiredHostPorts:      requiredHostPorts,
-		Nodes:                  make([]NodePlacementEligibility, 0, len(inventory.Nodes)),
+		EvaluatedInputs:            []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements", "cpu_memory_reservations", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability_warnings"},
+		UnevaluatedInputs:          []string{"generic_resources"},
+		EvaluatedConstraints:       evaluatedConstraints,
+		UnevaluatedConstraints:     unevaluatedConstraints,
+		RequiredPlatforms:          append([]Platform{}, service.RequiredPlatforms...),
+		RequiredResources:          service.Reservations,
+		MaxReplicasPerNode:         service.MaxReplicasPerNode,
+		RequiredHostPorts:          requiredHostPorts,
+		StoragePortabilityWarnings: storageWarnings,
+		Nodes:                      make([]NodePlacementEligibility, 0, len(inventory.Nodes)),
 	}
 	reservedByNode := reservedResourcesByNode(inventory.Tasks)
 	activeServiceTasksByNode := activeTasksByNode(inventory.Tasks, service.ID)
@@ -361,6 +379,48 @@ func assessNodePlacement(inventory Result, service Service) PlacementEligibility
 		return eligibility.Nodes[a].ID < eligibility.Nodes[b].ID
 	})
 	return eligibility
+}
+
+func storagePortabilityWarnings(mounts []StorageMount) []StorageWarning {
+	warnings := make([]StorageWarning, 0, len(mounts))
+	for _, mount := range mounts {
+		var warning StorageWarning
+		switch {
+		case mount.Type == "bind":
+			warning = StorageWarning{
+				Code:    "bind_mount",
+				Source:  mount.Source,
+				Target:  mount.Target,
+				Message: fmt.Sprintf("bind mount %s -> %s may not be portable across nodes", mount.Source, mount.Target),
+			}
+		case mount.Type == "volume" && mount.NodeLocal:
+			message := fmt.Sprintf("volume %s -> %s uses node-local storage", mount.Source, mount.Target)
+			if mount.Source == "" {
+				message = fmt.Sprintf("anonymous volume -> %s uses node-local storage", mount.Target)
+			}
+			warning = StorageWarning{
+				Code:    "node_local_volume",
+				Source:  mount.Source,
+				Target:  mount.Target,
+				Message: message,
+			}
+		default:
+			continue
+		}
+		if !slices.Contains(warnings, warning) {
+			warnings = append(warnings, warning)
+		}
+	}
+	sort.Slice(warnings, func(a, b int) bool {
+		if warnings[a].Target != warnings[b].Target {
+			return warnings[a].Target < warnings[b].Target
+		}
+		if warnings[a].Source != warnings[b].Source {
+			return warnings[a].Source < warnings[b].Source
+		}
+		return warnings[a].Code < warnings[b].Code
+	})
+	return warnings
 }
 
 func canonicalHostPorts(ports []HostPort) []HostPort {

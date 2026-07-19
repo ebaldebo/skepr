@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/ebaldebo/skepr/internal/status"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/swarm"
 	"github.com/moby/moby/client"
 )
@@ -137,6 +138,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			Reservations:         resourceReservations(service.Spec.TaskTemplate.Resources),
 			MaxReplicasPerNode:   maxReplicasPerNode(service.Spec.TaskTemplate.Placement),
 			HostPorts:            serviceHostPorts(service.Spec.EndpointSpec),
+			StorageMounts:        serviceStorageMounts(service.Spec.TaskTemplate.ContainerSpec),
 		})
 	}
 	sort.Slice(result.Services, func(a, b int) bool {
@@ -284,6 +286,45 @@ func sortHostPorts(ports []status.HostPort) {
 		}
 		return ports[a].Protocol < ports[b].Protocol
 	})
+}
+
+func serviceStorageMounts(container *swarm.ContainerSpec) []status.StorageMount {
+	if container == nil {
+		return nil
+	}
+	mounts := make([]status.StorageMount, 0, len(container.Mounts))
+	for _, serviceMount := range container.Mounts {
+		if serviceMount.Type != mount.TypeBind && serviceMount.Type != mount.TypeVolume {
+			continue
+		}
+		normalized := status.StorageMount{
+			Type:      string(serviceMount.Type),
+			Source:    serviceMount.Source,
+			Target:    serviceMount.Target,
+			NodeLocal: serviceMount.Type == mount.TypeVolume && nodeLocalVolume(serviceMount.VolumeOptions),
+		}
+		if !slices.Contains(mounts, normalized) {
+			mounts = append(mounts, normalized)
+		}
+	}
+	sort.Slice(mounts, func(a, b int) bool {
+		if mounts[a].Target != mounts[b].Target {
+			return mounts[a].Target < mounts[b].Target
+		}
+		if mounts[a].Source != mounts[b].Source {
+			return mounts[a].Source < mounts[b].Source
+		}
+		return mounts[a].Type < mounts[b].Type
+	})
+	return mounts
+}
+
+func nodeLocalVolume(options *mount.VolumeOptions) bool {
+	if options == nil || options.DriverConfig == nil {
+		return true
+	}
+	driver := options.DriverConfig
+	return (driver.Name == "" || driver.Name == "local") && len(driver.Options) == 0
 }
 
 func resourceReservations(requirements *swarm.ResourceRequirements) status.Resources {
