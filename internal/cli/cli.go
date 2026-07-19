@@ -44,6 +44,8 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 		return runStatus(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "service":
 		return runService(ctx, args[1:], *contextName, connector, stdout, stderr)
+	case "node":
+		return runNode(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "check":
 		return runCheck(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "maintenance":

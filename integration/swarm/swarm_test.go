@@ -14,6 +14,7 @@ import (
 
 	"github.com/ebaldebo/skepr/internal/cli"
 	skeprdocker "github.com/ebaldebo/skepr/internal/docker"
+	"github.com/ebaldebo/skepr/internal/drain"
 	"github.com/ebaldebo/skepr/internal/maintenance"
 	"github.com/ebaldebo/skepr/internal/operations"
 	"github.com/ebaldebo/skepr/internal/preflight"
@@ -78,6 +79,21 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Contains(t, checkOutput.String(), "PASS: Swarm manager manager-3 is healthy")
 	assert.Contains(t, checkOutput.String(), "SAFE: target node worker-1 passed checks")
 	assert.Contains(t, checkOutput.String(), "Target workloads: 0 desired-running tasks across 0 affected services")
+
+	var previewOutput bytes.Buffer
+	var previewErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"node", "drain", "worker-1", "--dry-run", "--json"}, connector, &previewOutput, &previewErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, previewErrors.String())
+	var preview drain.Preview
+	require.NoError(t, json.Unmarshal(previewOutput.Bytes(), &preview))
+	assert.Equal(t, drain.PreviewSchemaVersion, preview.SchemaVersion)
+	require.NotNil(t, preview.Target)
+	assert.Equal(t, "worker-1", preview.Target.Hostname)
+	assert.True(t, preview.SafeToDrain)
+	assert.True(t, preview.SafeToTakeOffline)
+	assert.Empty(t, preview.ReplicatedTasks)
+	assert.Empty(t, preview.GlobalTasks)
+	assert.Empty(t, preview.ServiceImpacts)
 
 	var beginOutput bytes.Buffer
 	var beginErrors bytes.Buffer
