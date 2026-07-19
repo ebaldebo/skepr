@@ -288,13 +288,14 @@ Current failures:
 Recent terminal tasks:
   database.1  failed  worker-1  old failure
 
-Placement eligibility (readiness, availability and supported constraints):
+Placement eligibility:
   manager-1  passes evaluated checks
   manager-2  passes evaluated checks
   worker-1   passes evaluated checks
 Evaluated constraints: none
+Required platforms: any
 Unevaluated constraints: none
-Other inputs not evaluated: platform, resources, replica limits, ports, storage
+Other inputs not evaluated: resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -306,7 +307,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
 
 	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.JSONEq(t, `{
-  "schema_version": 3,
+  "schema_version": 4,
   "health": "degraded",
   "service": {
     "id": "s2",
@@ -342,10 +343,10 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
     "evaluated_inputs": [
       "node_readiness",
       "node_availability",
-      "placement_constraints"
+      "placement_constraints",
+      "platform_requirements"
     ],
     "unevaluated_inputs": [
-      "platform_requirements",
       "resource_reservations",
       "maximum_replicas_per_node",
       "host_published_port_conflicts",
@@ -353,6 +354,7 @@ func TestServiceDiagnoseJSONOutput(t *testing.T) {
     ],
     "evaluated_constraints": [],
     "unevaluated_constraints": [],
+    "required_platforms": [],
     "nodes": [
       {
         "id": "m1",
@@ -394,13 +396,14 @@ Current failures: none
 Recent terminal tasks:
   api.1  failed  worker-1  old rollout failure
 
-Placement eligibility (readiness, availability and supported constraints):
+Placement eligibility:
   manager-1  passes evaluated checks
   manager-2  passes evaluated checks
   worker-1   passes evaluated checks
 Evaluated constraints: none
+Required platforms: any
 Unevaluated constraints: none
-Other inputs not evaluated: platform, resources, replica limits, ports, storage
+Other inputs not evaluated: resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -429,13 +432,14 @@ Current failures: none
 
 Recent terminal tasks: none
 
-Placement eligibility (readiness, availability and supported constraints):
+Placement eligibility:
   manager-1  passes evaluated checks
   worker-1   blocked: state is down
   worker-2   blocked: availability is drain
 Evaluated constraints: none
+Required platforms: any
 Unevaluated constraints: none
-Other inputs not evaluated: platform, resources, replica limits, ports, storage
+Other inputs not evaluated: resources, replica limits, ports, storage
 `, stdout.String())
 
 	stdout.Reset()
@@ -479,13 +483,14 @@ Current failures: none
 
 Recent terminal tasks: none
 
-Placement eligibility (readiness, availability and supported constraints):
+Placement eligibility:
   worker-east       passes evaluated checks
   worker-unlabeled  blocked: constraint node.labels.region==east does not match
   worker-west       blocked: constraint node.labels.region==east does not match
 Evaluated constraints: node.labels.region==east
+Required platforms: any
 Unevaluated constraints: engine.labels.storage==ssd
-Other inputs not evaluated: platform, resources, replica limits, ports, storage
+Other inputs not evaluated: resources, replica limits, ports, storage
 `, stdout.String())
 }
 
@@ -502,7 +507,8 @@ func TestServiceDiagnosisEvaluatesSupportedPlacementConstraints(t *testing.T) {
 		{name: "role inequality", constraint: "node.role!=manager", node: status.Node{Role: "worker"}, wantPass: true},
 		{name: "label inequality mismatch", constraint: "node.labels.storage!=ssd", node: status.Node{Labels: map[string]string{"storage": "ssd"}}},
 		{name: "missing label satisfies inequality", constraint: "node.labels.storage!=ssd", node: status.Node{}, wantPass: true},
-		{name: "platform remains unevaluated", constraint: "node.platform.os==linux", node: status.Node{}, wantPass: true, wantUnevaluated: []string{"node.platform.os==linux"}},
+		{name: "platform OS mismatch", constraint: "node.platform.os==linux", node: status.Node{Platform: status.Platform{OS: "darwin"}}},
+		{name: "platform architecture equality", constraint: "node.platform.arch==x86_64", node: status.Node{Platform: status.Platform{Architecture: "x86_64"}}, wantPass: true},
 	}
 
 	for _, test := range tests {
@@ -524,6 +530,55 @@ func TestServiceDiagnosisEvaluatesSupportedPlacementConstraints(t *testing.T) {
 			assert.Equal(t, wantUnevaluated, diagnosis.PlacementEligibility.UnevaluatedConstraints)
 		})
 	}
+}
+
+func TestServiceDiagnoseReportsPlatformEligibility(t *testing.T) {
+	t.Parallel()
+
+	connector := &fakeConnector{connection: resultInspector{result: status.Result{
+		Nodes: []status.Node{
+			{ID: "w1", Hostname: "linux-x86", State: "ready", Availability: "active", Platform: status.Platform{OS: "linux", Architecture: "x86_64"}},
+			{ID: "w2", Hostname: "linux-arm", State: "ready", Availability: "active", Platform: status.Platform{OS: "linux", Architecture: "arm64"}},
+			{ID: "w3", Hostname: "mac", State: "ready", Availability: "active", Platform: status.Platform{OS: "darwin", Architecture: "amd64"}},
+		},
+		Services: []status.Service{
+			{ID: "s1", Name: "database", Mode: "replicated", DesiredTasks: 1, RequiredPlatforms: []status.Platform{{OS: "linux", Architecture: "amd64"}}},
+		},
+	}}}
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "database"}, connector, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED service database
+Mode: replicated
+Tasks: 0/1 running
+
+Current failures: none
+
+Recent terminal tasks: none
+
+Placement eligibility:
+  linux-arm  blocked: platform linux/arm64 does not match required linux/amd64
+  linux-x86  passes evaluated checks
+  mac        blocked: platform darwin/amd64 does not match required linux/amd64
+Evaluated constraints: none
+Required platforms: linux/amd64
+Unevaluated constraints: none
+Other inputs not evaluated: resources, replica limits, ports, storage
+`, stdout.String())
+
+	stdout.Reset()
+	exitCode = Run(context.Background(), []string{"service", "diagnose", "database", "--json"}, connector, &stdout, &bytes.Buffer{})
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	var diagnosis status.ServiceDiagnosis
+	assert.NoError(t, json.Unmarshal(stdout.Bytes(), &diagnosis))
+	assert.Equal(t, status.ServiceDiagnosisSchemaVersion, diagnosis.SchemaVersion)
+	assert.Equal(t, []status.Platform{{OS: "linux", Architecture: "amd64"}}, diagnosis.PlacementEligibility.RequiredPlatforms)
+	assert.Equal(t, []status.PlacementBlocker{{
+		Code:    "platform_mismatch",
+		Message: "platform linux/arm64 does not match required linux/amd64",
+	}}, diagnosis.PlacementEligibility.Nodes[0].Blockers)
+	assert.True(t, diagnosis.PlacementEligibility.Nodes[1].PassesEvaluatedChecks)
 }
 
 func TestAssessHealthEvaluatesNodeAndManagerHealth(t *testing.T) {

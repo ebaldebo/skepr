@@ -89,6 +89,10 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			Availability:  string(node.Spec.Availability),
 			ManagerStatus: managerStatus,
 			Labels:        maps.Clone(node.Spec.Labels),
+			Platform: status.Platform{
+				OS:           node.Description.Platform.OS,
+				Architecture: node.Description.Platform.Architecture,
+			},
 		})
 	}
 	sort.Slice(result.Nodes, func(a, b int) bool {
@@ -127,6 +131,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			Converged:            service.ServiceStatus.RunningTasks == service.ServiceStatus.DesiredTasks,
 			ForceUpdate:          service.Spec.TaskTemplate.ForceUpdate,
 			PlacementConstraints: placementConstraints(service.Spec.TaskTemplate.Placement),
+			RequiredPlatforms:    requiredPlatforms(service.Spec.TaskTemplate.Placement),
 		})
 	}
 	sort.Slice(result.Services, func(a, b int) bool {
@@ -203,6 +208,17 @@ func placementConstraints(placement *swarm.Placement) []string {
 		return nil
 	}
 	return append([]string(nil), placement.Constraints...)
+}
+
+func requiredPlatforms(placement *swarm.Placement) []status.Platform {
+	if placement == nil {
+		return nil
+	}
+	platforms := make([]status.Platform, 0, len(placement.Platforms))
+	for _, platform := range placement.Platforms {
+		platforms = append(platforms, status.Platform{OS: platform.OS, Architecture: platform.Architecture})
+	}
+	return platforms
 }
 
 func unhealthyTaskState(state swarm.TaskState) bool {

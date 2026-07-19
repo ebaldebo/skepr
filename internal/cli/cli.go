@@ -126,19 +126,28 @@ func runServiceDiagnose(ctx context.Context, args []string, contextName string, 
 		output.WriteString("\nRecent terminal tasks:\n")
 		writeDiagnosisTasks(&output, diagnosis.RecentTerminalTasks)
 	}
-	output.WriteString("\nPlacement eligibility (readiness, availability and supported constraints):\n")
+	output.WriteString("\nPlacement eligibility:\n")
 	writePlacementEligibility(&output, diagnosis.PlacementEligibility.Nodes)
 	if len(diagnosis.PlacementEligibility.EvaluatedConstraints) == 0 {
 		output.WriteString("Evaluated constraints: none\n")
 	} else {
 		_, _ = fmt.Fprintf(&output, "Evaluated constraints: %s\n", strings.Join(diagnosis.PlacementEligibility.EvaluatedConstraints, ", "))
 	}
+	if len(diagnosis.PlacementEligibility.RequiredPlatforms) == 0 {
+		output.WriteString("Required platforms: any\n")
+	} else {
+		platforms := make([]string, 0, len(diagnosis.PlacementEligibility.RequiredPlatforms))
+		for _, platform := range diagnosis.PlacementEligibility.RequiredPlatforms {
+			platforms = append(platforms, platform.String())
+		}
+		_, _ = fmt.Fprintf(&output, "Required platforms: %s\n", strings.Join(platforms, ", "))
+	}
 	if len(diagnosis.PlacementEligibility.UnevaluatedConstraints) == 0 {
 		output.WriteString("Unevaluated constraints: none\n")
 	} else {
 		_, _ = fmt.Fprintf(&output, "Unevaluated constraints: %s\n", strings.Join(diagnosis.PlacementEligibility.UnevaluatedConstraints, ", "))
 	}
-	output.WriteString("Other inputs not evaluated: platform, resources, replica limits, ports, storage\n")
+	output.WriteString("Other inputs not evaluated: resources, replica limits, ports, storage\n")
 	if _, err := io.WriteString(stdout, output.String()); err != nil {
 		report(stderr, "write service diagnosis output: %v\n", err)
 		return ExitDockerConnection

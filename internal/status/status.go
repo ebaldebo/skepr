@@ -11,7 +11,25 @@ import (
 
 const SchemaVersion = 1
 const HealthSchemaVersion = 2
-const ServiceDiagnosisSchemaVersion = 3
+const ServiceDiagnosisSchemaVersion = 4
+
+type Platform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+}
+
+func (p Platform) String() string {
+	switch {
+	case p.OS == "" && p.Architecture == "":
+		return "unknown"
+	case p.OS == "":
+		return p.Architecture
+	case p.Architecture == "":
+		return p.OS
+	default:
+		return p.OS + "/" + p.Architecture
+	}
+}
 
 type Cluster struct {
 	ID               string `json:"id"`
@@ -27,17 +45,19 @@ type Node struct {
 	Availability  string            `json:"availability"`
 	ManagerStatus string            `json:"manager_status,omitempty"`
 	Labels        map[string]string `json:"-"`
+	Platform      Platform          `json:"-"`
 }
 
 type Service struct {
-	ID                   string   `json:"id"`
-	Name                 string   `json:"name"`
-	Mode                 string   `json:"mode"`
-	RunningTasks         uint64   `json:"running_tasks"`
-	DesiredTasks         uint64   `json:"desired_tasks"`
-	Converged            bool     `json:"converged"`
-	ForceUpdate          uint64   `json:"-"`
-	PlacementConstraints []string `json:"-"`
+	ID                   string     `json:"id"`
+	Name                 string     `json:"name"`
+	Mode                 string     `json:"mode"`
+	RunningTasks         uint64     `json:"running_tasks"`
+	DesiredTasks         uint64     `json:"desired_tasks"`
+	Converged            bool       `json:"converged"`
+	ForceUpdate          uint64     `json:"-"`
+	PlacementConstraints []string   `json:"-"`
+	RequiredPlatforms    []Platform `json:"-"`
 }
 
 type Task struct {
@@ -120,6 +140,7 @@ type PlacementEligibility struct {
 	UnevaluatedInputs      []string                   `json:"unevaluated_inputs"`
 	EvaluatedConstraints   []string                   `json:"evaluated_constraints"`
 	UnevaluatedConstraints []string                   `json:"unevaluated_constraints"`
+	RequiredPlatforms      []Platform                 `json:"required_platforms"`
 	Nodes                  []NodePlacementEligibility `json:"nodes"`
 }
 
@@ -146,7 +167,7 @@ func DiagnoseService(result Result, requested string) (ServiceDiagnosis, bool) {
 		Service:              service,
 		CurrentFailures:      []Task{},
 		RecentTerminalTasks:  []Task{},
-		PlacementEligibility: assessNodePlacement(result.Nodes, service.PlacementConstraints),
+		PlacementEligibility: assessNodePlacement(result.Nodes, service.PlacementConstraints, service.RequiredPlatforms),
 	}
 	for _, task := range result.UnhealthyTasks {
 		if task.ServiceID == service.ID {
@@ -185,17 +206,18 @@ type placementConstraint struct {
 	operator string
 }
 
-func assessNodePlacement(nodes []Node, constraints []string) PlacementEligibility {
+func assessNodePlacement(nodes []Node, constraints []string, requiredPlatforms []Platform) PlacementEligibility {
 	supportedConstraints, unevaluatedConstraints := parsePlacementConstraints(constraints)
 	evaluatedConstraints := make([]string, 0, len(supportedConstraints))
 	for _, constraint := range supportedConstraints {
 		evaluatedConstraints = append(evaluatedConstraints, constraint.raw)
 	}
 	eligibility := PlacementEligibility{
-		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints"},
-		UnevaluatedInputs:      []string{"platform_requirements", "resource_reservations", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability"},
+		EvaluatedInputs:        []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements"},
+		UnevaluatedInputs:      []string{"resource_reservations", "maximum_replicas_per_node", "host_published_port_conflicts", "storage_portability"},
 		EvaluatedConstraints:   evaluatedConstraints,
 		UnevaluatedConstraints: unevaluatedConstraints,
+		RequiredPlatforms:      append([]Platform{}, requiredPlatforms...),
 		Nodes:                  make([]NodePlacementEligibility, 0, len(nodes)),
 	}
 	for _, node := range nodes {
@@ -224,6 +246,16 @@ func assessNodePlacement(nodes []Node, constraints []string) PlacementEligibilit
 				})
 			}
 		}
+		if len(requiredPlatforms) > 0 && !matchesRequiredPlatform(node.Platform, requiredPlatforms) {
+			platforms := make([]string, 0, len(requiredPlatforms))
+			for _, platform := range requiredPlatforms {
+				platforms = append(platforms, platform.String())
+			}
+			result.Blockers = append(result.Blockers, PlacementBlocker{
+				Code:    "platform_mismatch",
+				Message: fmt.Sprintf("platform %s does not match required %s", node.Platform, strings.Join(platforms, " or ")),
+			})
+		}
 		result.PassesEvaluatedChecks = len(result.Blockers) == 0
 		eligibility.Nodes = append(eligibility.Nodes, result)
 	}
@@ -234,6 +266,28 @@ func assessNodePlacement(nodes []Node, constraints []string) PlacementEligibilit
 		return eligibility.Nodes[a].ID < eligibility.Nodes[b].ID
 	})
 	return eligibility
+}
+
+func matchesRequiredPlatform(node Platform, required []Platform) bool {
+	for _, platform := range required {
+		osMatches := platform.OS == "" || strings.EqualFold(platform.OS, node.OS)
+		architectureMatches := platform.Architecture == "" || normalizeArchitecture(platform.Architecture) == normalizeArchitecture(node.Architecture)
+		if osMatches && architectureMatches {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeArchitecture(architecture string) string {
+	switch strings.ToLower(architecture) {
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	default:
+		return strings.ToLower(architecture)
+	}
 }
 
 func parsePlacementConstraints(rawConstraints []string) ([]placementConstraint, []string) {
@@ -265,7 +319,7 @@ func parsePlacementConstraint(raw string) (placementConstraint, bool) {
 	if value == "" {
 		return placementConstraint{}, false
 	}
-	supported := key == "node.id" || key == "node.hostname" || key == "node.role" || strings.HasPrefix(key, "node.labels.") && len(key) > len("node.labels.")
+	supported := key == "node.id" || key == "node.hostname" || key == "node.role" || key == "node.platform.os" || key == "node.platform.arch" || strings.HasPrefix(key, "node.labels.") && len(key) > len("node.labels.")
 	if !supported {
 		return placementConstraint{}, false
 	}
@@ -282,6 +336,10 @@ func (c placementConstraint) matches(node Node) bool {
 		actual = node.Hostname
 	case c.key == "node.role":
 		actual = node.Role
+	case c.key == "node.platform.os":
+		actual = node.Platform.OS
+	case c.key == "node.platform.arch":
+		actual = node.Platform.Architecture
 	case strings.HasPrefix(c.key, "node.labels."):
 		actual, found = node.Labels[strings.TrimPrefix(c.key, "node.labels.")]
 	}

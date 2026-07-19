@@ -144,7 +144,10 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 		Annotations: swarm.Annotations{Name: "skepr-stalled-singleton"},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: &swarm.ContainerSpec{Image: "alpine:3.20"},
-			Placement:     &swarm.Placement{Constraints: []string{"node.hostname==missing-node"}},
+			Placement: &swarm.Placement{
+				Constraints: []string{"node.hostname==missing-node"},
+				Platforms:   []swarm.Platform{{OS: "windows"}},
+			},
 		},
 		Mode: swarm.ServiceMode{Replicated: &swarm.ReplicatedService{Replicas: &replicas}},
 	}})
@@ -181,16 +184,21 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, uint64(0), diagnosis.Service.RunningTasks)
 	assert.Equal(t, uint64(1), diagnosis.Service.DesiredTasks)
 	assert.Empty(t, diagnosis.CurrentFailures)
-	assert.Equal(t, []string{"node_readiness", "node_availability", "placement_constraints"}, diagnosis.PlacementEligibility.EvaluatedInputs)
+	assert.Equal(t, []string{"node_readiness", "node_availability", "placement_constraints", "platform_requirements"}, diagnosis.PlacementEligibility.EvaluatedInputs)
 	assert.Equal(t, []string{"node.hostname==missing-node"}, diagnosis.PlacementEligibility.EvaluatedConstraints)
+	assert.Equal(t, []status.Platform{{OS: "windows"}}, diagnosis.PlacementEligibility.RequiredPlatforms)
 	require.Len(t, diagnosis.PlacementEligibility.Nodes, 5)
 	for _, node := range diagnosis.PlacementEligibility.Nodes {
-		wantBlockers := []status.PlacementBlocker{{Code: "constraint_mismatch", Message: "constraint node.hostname==missing-node does not match"}}
+		wantCodes := []string{"constraint_mismatch", "platform_mismatch"}
 		if node.Hostname == "worker-2" {
-			wantBlockers = append([]status.PlacementBlocker{{Code: "node_not_active", Message: "availability is drain"}}, wantBlockers...)
+			wantCodes = append([]string{"node_not_active"}, wantCodes...)
 		}
 		assert.False(t, node.PassesEvaluatedChecks, node.Hostname)
-		assert.Equal(t, wantBlockers, node.Blockers, node.Hostname)
+		require.Len(t, node.Blockers, len(wantCodes), node.Hostname)
+		for index, code := range wantCodes {
+			assert.Equal(t, code, node.Blockers[index].Code, node.Hostname)
+		}
+		assert.Contains(t, node.Blockers[len(node.Blockers)-1].Message, "does not match required windows", node.Hostname)
 	}
 
 	operation.Phase = maintenance.PhaseWaitingServices
