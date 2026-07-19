@@ -169,6 +169,18 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 		require.True(t, time.Now().Before(deadline), "stalled singleton did not reach 0/1")
 		time.Sleep(100 * time.Millisecond)
 	}
+	var diagnosisOutput bytes.Buffer
+	var diagnosisErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"service", "diagnose", "skepr-stalled-singleton", "--json"}, connector, &diagnosisOutput, &diagnosisErrors)
+	require.Equal(t, cli.ExitSafetyGate, exitCode, diagnosisErrors.String())
+	var diagnosis status.ServiceDiagnosis
+	require.NoError(t, json.Unmarshal(diagnosisOutput.Bytes(), &diagnosis))
+	assert.Equal(t, status.ServiceDiagnosisSchemaVersion, diagnosis.SchemaVersion)
+	assert.Equal(t, status.HealthDegraded, diagnosis.Health)
+	assert.Equal(t, created.ID, diagnosis.Service.ID)
+	assert.Equal(t, uint64(0), diagnosis.Service.RunningTasks)
+	assert.Equal(t, uint64(1), diagnosis.Service.DesiredTasks)
+	assert.Empty(t, diagnosis.CurrentFailures)
 
 	operation.Phase = maintenance.PhaseWaitingServices
 	operation.PhaseTimestamps[maintenance.PhaseWaitingServices] = time.Now().UTC()

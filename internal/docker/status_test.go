@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ebaldebo/skepr/internal/status"
 	"github.com/moby/moby/api/types/swarm"
@@ -15,6 +16,7 @@ import (
 
 func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 	t.Parallel()
+	historicalAt := time.Date(2026, time.July, 19, 12, 0, 0, 0, time.UTC)
 
 	inspector := newInspector(fakeEngine{
 		host: "unix:///var/run/docker.sock",
@@ -78,7 +80,7 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 			{ID: "rejected", ServiceID: "s2", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateRejected, Err: "no suitable node"}},
 			{ID: "failed", ServiceID: "s1", Slot: 2, NodeID: "w1", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "exit code 1"}},
 			{ID: "orphaned", ServiceID: "s3", NodeID: "m2", DesiredState: swarm.TaskStateRunning, Status: swarm.TaskStatus{State: swarm.TaskStateOrphaned}},
-			{ID: "historical", ServiceID: "s2", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateShutdown, Status: swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "old failure"}},
+			{ID: "historical", Meta: swarm.Meta{UpdatedAt: historicalAt}, ServiceID: "s2", Slot: 1, NodeID: "w1", DesiredState: swarm.TaskStateShutdown, Status: swarm.TaskStatus{State: swarm.TaskStateFailed, Err: "old failure"}},
 		},
 	})
 
@@ -114,6 +116,14 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 			{ID: "healthy", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
 			{ID: "failed", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "failed", Error: "exit code 1"},
 			{ID: "starting", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "starting"},
+			{ID: "rejected", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
+		},
+		Tasks: []status.Task{
+			{ID: "orphaned", Name: "agent.manager-2", ServiceID: "s3", Service: "agent", NodeID: "m2", Node: "manager-2", DesiredState: "running", State: "orphaned"},
+			{ID: "healthy", Name: "api.1", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
+			{ID: "failed", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "failed", Error: "exit code 1"},
+			{ID: "starting", Name: "api.2", ServiceID: "s1", Service: "api", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "starting"},
+			{ID: "historical", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "shutdown", State: "failed", Error: "old failure", UpdatedAt: historicalAt},
 			{ID: "rejected", Name: "database.1", ServiceID: "s2", Service: "database", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
 		},
 	}, result)
@@ -310,8 +320,8 @@ func (f fakeEngine) ServiceList(_ context.Context, options client.ServiceListOpt
 }
 
 func (f fakeEngine) TaskList(_ context.Context, options client.TaskListOptions) (client.TaskListResult, error) {
-	if !options.Filters["desired-state"]["running"] {
-		return client.TaskListResult{}, errors.New("desired running tasks were not requested")
+	if len(options.Filters) != 0 {
+		return client.TaskListResult{}, errors.New("all tasks were not requested")
 	}
 	return client.TaskListResult{Items: f.tasks}, nil
 }

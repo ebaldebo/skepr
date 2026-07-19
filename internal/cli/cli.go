@@ -42,6 +42,8 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 	switch args[0] {
 	case "status":
 		return runStatus(ctx, args[1:], *contextName, connector, stdout, stderr)
+	case "service":
+		return runService(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "check":
 		return runCheck(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "maintenance":
@@ -50,6 +52,100 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 		report(stderr, "usage: skepr [--context name] <command>\n")
 		return ExitInvalidUsage
 	}
+}
+
+func runService(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		report(stderr, "usage: skepr [--context name] service <command>\n")
+		return ExitInvalidUsage
+	}
+	if args[0] == "diagnose" {
+		return runServiceDiagnose(ctx, args[1:], contextName, connector, stdout, stderr)
+	}
+	report(stderr, "usage: skepr [--context name] service <command>\n")
+	return ExitInvalidUsage
+}
+
+func runServiceDiagnose(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("service diagnose", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonOutput := flags.Bool("json", false, "emit JSON output")
+	if len(args) == 2 && args[1] == "--json" {
+		args = []string{"--json", args[0]}
+	}
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
+		if err == nil {
+			report(stderr, "usage: skepr [--context name] service diagnose <service> [--json]\n")
+		}
+		return ExitInvalidUsage
+	}
+
+	connection, err := connector.Connect(ctx, contextName)
+	if err != nil {
+		report(stderr, "configure Docker connection: %v\n", err)
+		return ExitDockerConnection
+	}
+	defer func() { _ = connection.Close() }()
+	result, err := connection.Inspect(ctx)
+	if err != nil {
+		report(stderr, "inspect Docker Swarm: %v\n", err)
+		return ExitDockerConnection
+	}
+	diagnosis, found := status.DiagnoseService(result, flags.Arg(0))
+	if !found {
+		report(stderr, "service %q was not found\n", flags.Arg(0))
+		return ExitSafetyGate
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(diagnosis); err != nil {
+			report(stderr, "write service diagnosis output: %v\n", err)
+			return ExitDockerConnection
+		}
+		if diagnosis.Health == status.HealthDegraded {
+			return ExitSafetyGate
+		}
+		return ExitSuccess
+	}
+
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "%s service %s\n", strings.ToUpper(string(diagnosis.Health)), diagnosis.Service.Name)
+	_, _ = fmt.Fprintf(&output, "Mode: %s\n", diagnosis.Service.Mode)
+	_, _ = fmt.Fprintf(&output, "Tasks: %d/%d running\n", diagnosis.Service.RunningTasks, diagnosis.Service.DesiredTasks)
+	if len(diagnosis.CurrentFailures) == 0 {
+		output.WriteString("\nCurrent failures: none\n")
+	} else {
+		output.WriteString("\nCurrent failures:\n")
+		writeDiagnosisTasks(&output, diagnosis.CurrentFailures)
+	}
+	if len(diagnosis.RecentTerminalTasks) == 0 {
+		output.WriteString("\nRecent terminal tasks: none\n")
+	} else {
+		output.WriteString("\nRecent terminal tasks:\n")
+		writeDiagnosisTasks(&output, diagnosis.RecentTerminalTasks)
+	}
+	if _, err := io.WriteString(stdout, output.String()); err != nil {
+		report(stderr, "write service diagnosis output: %v\n", err)
+		return ExitDockerConnection
+	}
+	if diagnosis.Health == status.HealthDegraded {
+		return ExitSafetyGate
+	}
+	return ExitSuccess
+}
+
+func writeDiagnosisTasks(writer io.Writer, tasks []status.Task) {
+	table := tabwriter.NewWriter(writer, 0, 2, 2, ' ', 0)
+	for _, task := range tasks {
+		_, _ = fmt.Fprintf(table, "  %s\t%s\t%s", task.Name, task.State, task.Node)
+		if task.Error != "" {
+			_, _ = fmt.Fprintf(table, "\t%s", task.Error)
+		}
+		_, _ = fmt.Fprintln(table)
+	}
+	_ = table.Flush()
 }
 
 func runMaintenance(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {

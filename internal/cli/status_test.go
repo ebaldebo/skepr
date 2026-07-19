@@ -269,6 +269,87 @@ func TestStatusUsesExplicitDockerContext(t *testing.T) {
 	assert.Equal(t, "swarm", connector.contextName)
 }
 
+func TestServiceDiagnoseReportsCurrentFailure(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "database"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.Equal(t, `DEGRADED service database
+Mode: replicated
+Tasks: 0/1 running
+
+Current failures:
+  database.1  rejected  worker-1  no suitable node
+
+Recent terminal tasks:
+  database.1  failed  worker-1  old failure
+`, stdout.String())
+}
+
+func TestServiceDiagnoseJSONOutput(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "database", "--json"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSafetyGate, exitCode)
+	assert.JSONEq(t, `{
+  "schema_version": 1,
+  "health": "degraded",
+  "service": {
+    "id": "s2",
+    "name": "database",
+    "mode": "replicated",
+    "running_tasks": 0,
+    "desired_tasks": 1,
+    "converged": false
+  },
+  "current_failures": [
+    {
+      "id": "t1",
+      "name": "database.1",
+      "service": "database",
+      "node": "worker-1",
+      "desired_state": "running",
+      "state": "rejected",
+      "error": "no suitable node"
+    }
+  ],
+  "recent_terminal_tasks": [
+    {
+      "id": "old-t1",
+      "name": "database.1",
+      "service": "database",
+      "node": "worker-1",
+      "desired_state": "shutdown",
+      "state": "failed",
+      "error": "old failure"
+    }
+  ]
+}`, stdout.String())
+	assert.NotContains(t, stdout.String(), "\x1b")
+}
+
+func TestServiceDiagnoseKeepsHistoricalFailureSeparateFromCurrentHealth(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	exitCode := Run(context.Background(), []string{"service", "diagnose", "s1"}, &fakeConnector{}, &stdout, &bytes.Buffer{})
+
+	assert.Equal(t, ExitSuccess, exitCode)
+	assert.Equal(t, `HEALTHY service api
+Mode: replicated
+Tasks: 2/2 running
+
+Current failures: none
+
+Recent terminal tasks:
+  api.1  failed  worker-1  old rollout failure
+`, stdout.String())
+}
+
 func TestAssessHealthEvaluatesNodeAndManagerHealth(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -352,7 +433,11 @@ func (fakeInspector) Inspect(context.Context) (status.Result, error) {
 			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
 		},
 		UnhealthyTasks: []status.Task{
-			{ID: "t1", Name: "database.1", Service: "database", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
+			{ID: "t1", Name: "database.1", ServiceID: "s2", Service: "database", Node: "worker-1", DesiredState: "running", State: "rejected", Error: "no suitable node"},
+		},
+		Tasks: []status.Task{
+			{ID: "old-api", Name: "api.1", ServiceID: "s1", Service: "api", Node: "worker-1", DesiredState: "shutdown", State: "failed", Error: "old rollout failure"},
+			{ID: "old-t1", Name: "database.1", ServiceID: "s2", Service: "database", Node: "worker-1", DesiredState: "shutdown", State: "failed", Error: "old failure"},
 		},
 	}, nil
 }

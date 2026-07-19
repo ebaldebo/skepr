@@ -133,15 +133,11 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 		return result.Services[a].Name < result.Services[b].Name
 	})
 
-	taskFilters := make(client.Filters).Add("desired-state", string(swarm.TaskStateRunning))
-	taskResponse, err := i.engine.TaskList(ctx, client.TaskListOptions{Filters: taskFilters})
+	taskResponse, err := i.engine.TaskList(ctx, client.TaskListOptions{})
 	if err != nil {
 		return status.Result{}, fmt.Errorf("query Swarm tasks at %q: %w", i.endpoint, err)
 	}
 	for _, task := range taskResponse.Items {
-		if task.DesiredState != swarm.TaskStateRunning {
-			continue
-		}
 		serviceName := serviceNames[task.ServiceID]
 		if serviceName == "" {
 			serviceName = task.ServiceID
@@ -167,6 +163,11 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			DesiredState: string(task.DesiredState),
 			State:        string(task.Status.State),
 			Error:        task.Status.Err,
+			UpdatedAt:    task.UpdatedAt,
+		}
+		result.Tasks = append(result.Tasks, normalizedTask)
+		if task.DesiredState != swarm.TaskStateRunning {
+			continue
 		}
 		result.DesiredTasks = append(result.DesiredTasks, normalizedTask)
 		if unhealthyTaskState(task.Status.State) {
@@ -184,6 +185,12 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			return result.UnhealthyTasks[a].Name < result.UnhealthyTasks[b].Name
 		}
 		return result.UnhealthyTasks[a].ID < result.UnhealthyTasks[b].ID
+	})
+	sort.Slice(result.Tasks, func(a, b int) bool {
+		if result.Tasks[a].Name != result.Tasks[b].Name {
+			return result.Tasks[a].Name < result.Tasks[b].Name
+		}
+		return result.Tasks[a].ID < result.Tasks[b].ID
 	})
 	return result, nil
 }

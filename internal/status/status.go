@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
+	"time"
 )
 
 const SchemaVersion = 1
 const HealthSchemaVersion = 2
+const ServiceDiagnosisSchemaVersion = 1
 
 type Cluster struct {
 	ID               string `json:"id"`
@@ -36,15 +39,16 @@ type Service struct {
 }
 
 type Task struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	ServiceID    string `json:"-"`
-	Service      string `json:"service"`
-	NodeID       string `json:"-"`
-	Node         string `json:"node"`
-	DesiredState string `json:"desired_state"`
-	State        string `json:"state"`
-	Error        string `json:"error,omitempty"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	ServiceID    string    `json:"-"`
+	Service      string    `json:"service"`
+	NodeID       string    `json:"-"`
+	Node         string    `json:"node"`
+	DesiredState string    `json:"desired_state"`
+	State        string    `json:"state"`
+	Error        string    `json:"error,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitzero"`
 }
 
 type Result struct {
@@ -56,6 +60,7 @@ type Result struct {
 	Services       []Service `json:"services,omitempty"`
 	UnhealthyTasks []Task    `json:"unhealthy_tasks,omitempty"`
 	DesiredTasks   []Task    `json:"-"`
+	Tasks          []Task    `json:"-"`
 }
 
 type Health string
@@ -97,6 +102,79 @@ type HealthReport struct {
 	Nodes          []Node          `json:"nodes,omitempty"`
 	Services       []Service       `json:"services,omitempty"`
 	UnhealthyTasks []Task          `json:"unhealthy_tasks,omitempty"`
+}
+
+type ServiceDiagnosis struct {
+	SchemaVersion       int     `json:"schema_version"`
+	Health              Health  `json:"health"`
+	Service             Service `json:"service"`
+	CurrentFailures     []Task  `json:"current_failures"`
+	RecentTerminalTasks []Task  `json:"recent_terminal_tasks"`
+}
+
+func DiagnoseService(result Result, requested string) (ServiceDiagnosis, bool) {
+	service, found := resolveService(result.Services, requested)
+	if !found {
+		return ServiceDiagnosis{}, false
+	}
+	diagnosis := ServiceDiagnosis{
+		SchemaVersion:       ServiceDiagnosisSchemaVersion,
+		Health:              HealthHealthy,
+		Service:             service,
+		CurrentFailures:     []Task{},
+		RecentTerminalTasks: []Task{},
+	}
+	for _, task := range result.UnhealthyTasks {
+		if task.ServiceID == service.ID {
+			diagnosis.CurrentFailures = append(diagnosis.CurrentFailures, task)
+		}
+	}
+	for _, task := range result.Tasks {
+		if task.ServiceID == service.ID && task.DesiredState != "running" && terminalTaskState(task.State) {
+			diagnosis.RecentTerminalTasks = append(diagnosis.RecentTerminalTasks, task)
+		}
+	}
+	sort.Slice(diagnosis.RecentTerminalTasks, func(a, b int) bool {
+		left := diagnosis.RecentTerminalTasks[a]
+		right := diagnosis.RecentTerminalTasks[b]
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		if left.Name != right.Name {
+			return left.Name < right.Name
+		}
+		return left.ID < right.ID
+	})
+	if len(diagnosis.RecentTerminalTasks) > 5 {
+		diagnosis.RecentTerminalTasks = diagnosis.RecentTerminalTasks[:5]
+	}
+	if !service.Converged || len(diagnosis.CurrentFailures) > 0 {
+		diagnosis.Health = HealthDegraded
+	}
+	return diagnosis, true
+}
+
+func terminalTaskState(state string) bool {
+	switch state {
+	case "complete", "shutdown", "failed", "rejected", "remove", "orphaned":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveService(services []Service, requested string) (Service, bool) {
+	for _, service := range services {
+		if service.ID == requested {
+			return service, true
+		}
+	}
+	for _, service := range services {
+		if service.Name == requested {
+			return service, true
+		}
+	}
+	return Service{}, false
 }
 
 func BuildHealthReport(result Result, assessment HealthAssessment) HealthReport {
