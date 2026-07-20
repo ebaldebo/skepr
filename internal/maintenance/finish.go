@@ -259,7 +259,7 @@ func (f Finisher) timeout() time.Duration {
 	if f.Timeout > 0 {
 		return f.Timeout
 	}
-	return defaultBeginTimeout
+	return defaultMaintenanceTimeout
 }
 
 func (f Finisher) pollInterval() time.Duration {

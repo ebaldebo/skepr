@@ -112,12 +112,10 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, activateResult.TotalManagers, activateResult.HealthyManagers)
 	assert.Equal(t, activateResult.TotalServices, activateResult.ConvergedServices)
 
-	var beginOutput bytes.Buffer
-	var beginErrors bytes.Buffer
-	exitCode = cli.Run(context.Background(), []string{"maintenance", "begin", "worker-1", "--timeout", "30s"}, connector, &beginOutput, &beginErrors)
-	require.Equal(t, cli.ExitSuccess, exitCode, beginErrors.String())
-	assert.Contains(t, beginOutput.String(), "Target: worker-1 (")
-	assert.Contains(t, beginOutput.String(), "Phase: maintenance-ready")
+	recoveryDrain := drainNode(t, connector, "worker-1")
+	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
+	legacyOperation := newLegacyOperation("legacy-worker-1", recoveryDrain)
+	require.NoError(t, store.Save(legacyOperation))
 
 	connection, err := connector.Connect(context.Background(), "")
 	require.NoError(t, err)
@@ -139,7 +137,6 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Contains(t, showOutput.String(), "Phase: maintenance-ready")
 	assert.Contains(t, showOutput.String(), "Live target: ready drain")
 	assert.Contains(t, showOutput.String(), "Live target tasks: 0 desired-running")
-	store := operations.NewStore(filepath.Join(stateHome, "skepr"))
 	operation, err := store.LatestActive()
 	require.NoError(t, err)
 	require.NotNil(t, operation)
@@ -161,10 +158,8 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, maintenance.PhaseCompleted, persisted.Phase)
 
-	var secondBeginOutput bytes.Buffer
-	var secondBeginErrors bytes.Buffer
-	exitCode = cli.Run(context.Background(), []string{"maintenance", "begin", "worker-2", "--timeout", "30s"}, connector, &secondBeginOutput, &secondBeginErrors)
-	require.Equal(t, cli.ExitSuccess, exitCode, secondBeginErrors.String())
+	secondDrain := drainNode(t, connector, "worker-2")
+	require.NoError(t, store.Save(newLegacyOperation("legacy-worker-2", secondDrain)))
 	operation, err = store.LatestActive()
 	require.NoError(t, err)
 	require.NotNil(t, operation)
@@ -314,4 +309,32 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	exitCode = cli.Run(context.Background(), []string{"maintenance", "finish", operation.ID, "--timeout", "30s"}, connector, &recoveredFinishOutput, &recoveredFinishErrors)
 	require.Equal(t, cli.ExitSuccess, exitCode, recoveredFinishErrors.String())
 	assert.Contains(t, recoveredFinishOutput.String(), "Phase: completed")
+}
+
+func drainNode(t *testing.T, connector status.Connector, node string) drain.Result {
+	t.Helper()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := cli.Run(context.Background(), []string{"node", "drain", node, "--timeout", "30s", "--json"}, connector, &stdout, &stderr)
+	require.Equal(t, cli.ExitSuccess, exitCode, stderr.String())
+	var result drain.Result
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	return result
+}
+
+func newLegacyOperation(id string, result drain.Result) maintenance.Operation {
+	now := time.Now().UTC()
+	return maintenance.Operation{
+		SchemaVersion:    maintenance.OperationSchemaVersion,
+		ID:               id,
+		ClusterID:        result.ClusterID,
+		Endpoint:         result.Endpoint,
+		Target:           result.Target,
+		Phase:            maintenance.PhaseMaintenanceReady,
+		PhaseTimestamps:  map[maintenance.Phase]time.Time{maintenance.PhaseMaintenanceReady: now},
+		MutationOccurred: true,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
 }

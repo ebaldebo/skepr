@@ -7,7 +7,11 @@ import (
 	"github.com/ebaldebo/skepr/internal/status"
 )
 
-const OperationSchemaVersion = 2
+const (
+	OperationSchemaVersion    = 2
+	defaultMaintenanceTimeout = 5 * time.Minute
+	defaultPollInterval       = time.Second
+)
 
 type Operation struct {
 	SchemaVersion          int                      `json:"schema_version"`

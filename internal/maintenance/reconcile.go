@@ -334,7 +334,7 @@ func (r Reconciler) timeout() time.Duration {
 	if r.Timeout > 0 {
 		return r.Timeout
 	}
-	return defaultBeginTimeout
+	return defaultMaintenanceTimeout
 }
 
 func (r Reconciler) pollInterval() time.Duration {
