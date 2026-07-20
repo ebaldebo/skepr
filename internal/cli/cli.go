@@ -115,8 +115,43 @@ func writeRebalanceReport(writer io.Writer, result rebalance.Report) error {
 	writeRebalanceServiceSection(&output, "Constrained", result.Services, rebalance.StateConstrained)
 	writeRebalanceServiceSection(&output, "No opportunity", result.Services, rebalance.StateNoOpportunity)
 	writeRebalanceServiceSection(&output, "Not assessed", result.Services, rebalance.StateNotAssessed)
+	if len(result.NodeReservations) > 0 {
+		_, _ = fmt.Fprintln(&output, "\nDeclared reservations:")
+		for _, node := range result.NodeReservations {
+			taskWord := "tasks"
+			if node.ActiveTasks == 1 {
+				taskWord = "task"
+			}
+			_, _ = fmt.Fprintf(
+				&output,
+				"  %s: %s reserved of %s (%d active %s)\n",
+				node.Hostname,
+				node.Resources.Reserved,
+				node.Resources.Capacity,
+				node.ActiveTasks,
+				taskWord,
+			)
+			writeTasksWithoutReservations(&output, "CPU", node.TasksWithoutCPUReservations)
+			writeTasksWithoutReservations(&output, "memory", node.TasksWithoutMemoryReservations)
+		}
+	}
 	_, err := io.WriteString(writer, output.String())
 	return err
+}
+
+func writeTasksWithoutReservations(output *strings.Builder, resource string, tasks []rebalance.TaskReference) {
+	if len(tasks) == 0 {
+		return
+	}
+	names := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		name := task.Name
+		if name == "" {
+			name = task.ID
+		}
+		names = append(names, name)
+	}
+	_, _ = fmt.Fprintf(output, "    tasks without %s reservations: %s\n", resource, strings.Join(names, ", "))
 }
 
 func writeRebalanceServiceSection(output *strings.Builder, heading string, services []rebalance.ServiceAssessment, state string) {

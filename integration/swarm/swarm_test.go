@@ -81,6 +81,17 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, rebalance.SchemaVersion, rebalanceReport.SchemaVersion)
 	assert.Equal(t, health.Cluster.ID, rebalanceReport.ClusterID)
 	assert.Zero(t, rebalanceReport.Summary.Opportunities)
+	assert.Zero(t, rebalanceReport.Summary.ActiveTasks)
+	assert.Zero(t, rebalanceReport.Summary.TasksWithoutCPUReservations)
+	assert.Zero(t, rebalanceReport.Summary.TasksWithoutMemoryReservations)
+	require.Len(t, rebalanceReport.NodeReservations, 5)
+	for _, node := range rebalanceReport.NodeReservations {
+		assert.Positive(t, node.Resources.Capacity.NanoCPUs, node.Hostname)
+		assert.Positive(t, node.Resources.Capacity.MemoryBytes, node.Hostname)
+		assert.Equal(t, node.Resources.Capacity, node.Resources.Available, node.Hostname)
+		assert.Empty(t, node.TasksWithoutCPUReservations, node.Hostname)
+		assert.Empty(t, node.TasksWithoutMemoryReservations, node.Hostname)
+	}
 
 	var previewOutput bytes.Buffer
 	var previewErrors bytes.Buffer

@@ -8,7 +8,7 @@ import (
 	"github.com/ebaldebo/skepr/internal/status"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 const (
 	StateOpportunity   = "opportunity"
@@ -18,11 +18,14 @@ const (
 )
 
 type Summary struct {
-	ReplicatedServices  int `json:"replicated_services"`
-	AssessedServices    int `json:"assessed_services"`
-	Opportunities       int `json:"opportunities"`
-	ConstrainedServices int `json:"constrained_services"`
-	NotAssessedServices int `json:"not_assessed_services"`
+	ReplicatedServices             int `json:"replicated_services"`
+	AssessedServices               int `json:"assessed_services"`
+	Opportunities                  int `json:"opportunities"`
+	ConstrainedServices            int `json:"constrained_services"`
+	NotAssessedServices            int `json:"not_assessed_services"`
+	ActiveTasks                    int `json:"active_tasks"`
+	TasksWithoutCPUReservations    int `json:"tasks_without_cpu_reservations"`
+	TasksWithoutMemoryReservations int `json:"tasks_without_memory_reservations"`
 }
 
 type NodeTaskCount struct {
@@ -47,20 +50,42 @@ type ServiceAssessment struct {
 	UnevaluatedConstraints    []string                `json:"unevaluated_constraints"`
 }
 
+type TaskReference struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Service string `json:"service"`
+}
+
+type NodeReservation struct {
+	ID                             string               `json:"id"`
+	Hostname                       string               `json:"hostname"`
+	ActiveTasks                    int                  `json:"active_tasks"`
+	Resources                      status.NodeResources `json:"resources"`
+	TasksWithoutCPUReservations    []TaskReference      `json:"tasks_without_cpu_reservations"`
+	TasksWithoutMemoryReservations []TaskReference      `json:"tasks_without_memory_reservations"`
+}
+
 type Report struct {
-	SchemaVersion int                 `json:"schema_version"`
-	Endpoint      string              `json:"endpoint"`
-	ClusterID     string              `json:"cluster_id"`
-	Summary       Summary             `json:"summary"`
-	Services      []ServiceAssessment `json:"services"`
+	SchemaVersion    int                 `json:"schema_version"`
+	Endpoint         string              `json:"endpoint"`
+	ClusterID        string              `json:"cluster_id"`
+	Summary          Summary             `json:"summary"`
+	Services         []ServiceAssessment `json:"services"`
+	NodeReservations []NodeReservation   `json:"node_reservations"`
 }
 
 func BuildReport(inventory status.Result) Report {
 	report := Report{
-		SchemaVersion: SchemaVersion,
-		Endpoint:      inventory.Endpoint,
-		ClusterID:     inventory.Cluster.ID,
-		Services:      []ServiceAssessment{},
+		SchemaVersion:    SchemaVersion,
+		Endpoint:         inventory.Endpoint,
+		ClusterID:        inventory.Cluster.ID,
+		Services:         []ServiceAssessment{},
+		NodeReservations: buildNodeReservations(inventory),
+	}
+	for _, node := range report.NodeReservations {
+		report.Summary.ActiveTasks += node.ActiveTasks
+		report.Summary.TasksWithoutCPUReservations += len(node.TasksWithoutCPUReservations)
+		report.Summary.TasksWithoutMemoryReservations += len(node.TasksWithoutMemoryReservations)
 	}
 	for _, service := range inventory.Services {
 		assessment := assessService(inventory, service)
@@ -88,6 +113,55 @@ func BuildReport(inventory status.Result) Report {
 		return report.Services[a].ID < report.Services[b].ID
 	})
 	return report
+}
+
+func buildNodeReservations(inventory status.Result) []NodeReservation {
+	reservations := make([]NodeReservation, 0, len(inventory.Nodes))
+	for _, node := range inventory.Nodes {
+		reservation := NodeReservation{
+			ID:                             node.ID,
+			Hostname:                       node.Hostname,
+			Resources:                      status.NodeResources{Capacity: node.Resources, Available: node.Resources},
+			TasksWithoutCPUReservations:    []TaskReference{},
+			TasksWithoutMemoryReservations: []TaskReference{},
+		}
+		for _, task := range inventory.Tasks {
+			if task.NodeID != node.ID || !activeTaskState(task.State) {
+				continue
+			}
+			reservation.ActiveTasks++
+			reservation.Resources.Reserved.NanoCPUs += task.Reservations.NanoCPUs
+			reservation.Resources.Reserved.MemoryBytes += task.Reservations.MemoryBytes
+			reference := TaskReference{ID: task.ID, Name: task.Name, Service: task.Service}
+			if task.Reservations.NanoCPUs == 0 {
+				reservation.TasksWithoutCPUReservations = append(reservation.TasksWithoutCPUReservations, reference)
+			}
+			if task.Reservations.MemoryBytes == 0 {
+				reservation.TasksWithoutMemoryReservations = append(reservation.TasksWithoutMemoryReservations, reference)
+			}
+		}
+		reservation.Resources.Available.NanoCPUs = max(reservation.Resources.Capacity.NanoCPUs-reservation.Resources.Reserved.NanoCPUs, 0)
+		reservation.Resources.Available.MemoryBytes = max(reservation.Resources.Capacity.MemoryBytes-reservation.Resources.Reserved.MemoryBytes, 0)
+		sortTaskReferences(reservation.TasksWithoutCPUReservations)
+		sortTaskReferences(reservation.TasksWithoutMemoryReservations)
+		reservations = append(reservations, reservation)
+	}
+	sort.Slice(reservations, func(a, b int) bool {
+		if reservations[a].Hostname != reservations[b].Hostname {
+			return reservations[a].Hostname < reservations[b].Hostname
+		}
+		return reservations[a].ID < reservations[b].ID
+	})
+	return reservations
+}
+
+func sortTaskReferences(tasks []TaskReference) {
+	sort.Slice(tasks, func(a, b int) bool {
+		if tasks[a].Name != tasks[b].Name {
+			return tasks[a].Name < tasks[b].Name
+		}
+		return tasks[a].ID < tasks[b].ID
+	})
 }
 
 func assessService(inventory status.Result, service status.Service) ServiceAssessment {

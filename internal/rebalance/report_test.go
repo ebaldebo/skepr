@@ -121,6 +121,57 @@ func TestBuildReportExplainsServicesItCannotAssess(t *testing.T) {
 	}
 }
 
+func TestBuildReportSummarizesDeclaredReservations(t *testing.T) {
+	t.Parallel()
+
+	inventory := status.Result{
+		Nodes: []status.Node{
+			{ID: "w2", Hostname: "worker-2", Resources: status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 4 << 30}},
+			{ID: "w1", Hostname: "worker-1", Resources: status.Resources{NanoCPUs: 4_000_000_000, MemoryBytes: 8 << 30}},
+		},
+		Tasks: []status.Task{
+			{ID: "t1", Name: "api.1", Service: "api", NodeID: "w1", State: "running", Reservations: status.Resources{NanoCPUs: 1_000_000_000, MemoryBytes: 512 << 20}},
+			{ID: "t2", Name: "api.2", Service: "api", NodeID: "w1", State: "preparing"},
+			{ID: "t3", Name: "worker.1", Service: "worker", NodeID: "w1", State: "running", Reservations: status.Resources{MemoryBytes: 256 << 20}},
+			{ID: "t4", Name: "old.1", Service: "old", NodeID: "w1", State: "failed"},
+			{ID: "t5", Name: "pending.1", Service: "pending", State: "pending"},
+		},
+	}
+
+	report := BuildReport(inventory)
+
+	assert.Equal(t, 3, report.Summary.ActiveTasks)
+	assert.Equal(t, 2, report.Summary.TasksWithoutCPUReservations)
+	assert.Equal(t, 1, report.Summary.TasksWithoutMemoryReservations)
+	assert.Equal(t, []NodeReservation{
+		{
+			ID:          "w1",
+			Hostname:    "worker-1",
+			ActiveTasks: 3,
+			Resources: status.NodeResources{
+				Capacity:  status.Resources{NanoCPUs: 4_000_000_000, MemoryBytes: 8 << 30},
+				Reserved:  status.Resources{NanoCPUs: 1_000_000_000, MemoryBytes: 768 << 20},
+				Available: status.Resources{NanoCPUs: 3_000_000_000, MemoryBytes: 7424 << 20},
+			},
+			TasksWithoutCPUReservations: []TaskReference{
+				{ID: "t2", Name: "api.2", Service: "api"},
+				{ID: "t3", Name: "worker.1", Service: "worker"},
+			},
+			TasksWithoutMemoryReservations: []TaskReference{{ID: "t2", Name: "api.2", Service: "api"}},
+		},
+		{
+			ID:       "w2",
+			Hostname: "worker-2",
+			Resources: status.NodeResources{
+				Capacity:  status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 4 << 30},
+				Available: status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 4 << 30},
+			},
+			TasksWithoutCPUReservations:    []TaskReference{},
+			TasksWithoutMemoryReservations: []TaskReference{},
+		},
+	}, report.NodeReservations)
+}
+
 func reportTestInventory() status.Result {
 	tasks := []status.Task{
 		{ID: "t1", ServiceID: "s1", NodeID: "w1", Node: "worker-1", DesiredState: "running", State: "running"},
