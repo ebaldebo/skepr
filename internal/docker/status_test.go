@@ -88,6 +88,7 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 						{Type: mount.TypeTmpfs, Target: "/run"},
 					}}, Placement: &swarm.Placement{
 						Constraints: []string{"node.labels.region==east"},
+						Preferences: []swarm.PlacementPreference{{Spread: &swarm.SpreadOver{SpreadDescriptor: "node.labels.zone"}}},
 						Platforms:   []swarm.Platform{{OS: "linux", Architecture: "amd64"}},
 						MaxReplicas: 1,
 					}, Resources: &swarm.ResourceRequirements{Reservations: &swarm.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 2 << 30}}},
@@ -123,7 +124,7 @@ func TestInspectorNormalizesSwarmStatus(t *testing.T) {
 			{ID: "w1", Hostname: "worker-1", Role: "worker", State: "ready", Availability: "active", Labels: map[string]string{"region": "east"}, Platform: status.Platform{OS: "linux", Architecture: "x86_64"}, Resources: status.Resources{NanoCPUs: 4_000_000_000, MemoryBytes: 8 << 30}},
 		},
 		Services: []status.Service{
-			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false, ForceUpdate: 7, PlacementConstraints: []string{"node.labels.region==east"}, RequiredPlatforms: []status.Platform{{OS: "linux", Architecture: "amd64"}}, Reservations: status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 2 << 30}, MaxReplicasPerNode: 1, HostPorts: []status.HostPort{{Protocol: "tcp", PublishedPort: 8080}}, StorageMounts: []status.StorageMount{{Type: "volume", Source: "database-cache", Target: "/cache", NodeLocal: true}, {Type: "bind", Source: "/srv/database", Target: "/etc/database"}, {Type: "volume", Source: "plugin-data", Target: "/plugin"}, {Type: "volume", Source: "shared-data", Target: "/shared"}, {Type: "volume", Source: "database-data", Target: "/var/lib/database", NodeLocal: true}}},
+			{ID: "s2", Name: "database", Mode: "replicated", RunningTasks: 0, DesiredTasks: 1, Converged: false, ForceUpdate: 7, PlacementConstraints: []string{"node.labels.region==east"}, PlacementPreferences: []string{"spread=node.labels.zone"}, RequiredPlatforms: []status.Platform{{OS: "linux", Architecture: "amd64"}}, Reservations: status.Resources{NanoCPUs: 2_000_000_000, MemoryBytes: 2 << 30}, MaxReplicasPerNode: 1, HostPorts: []status.HostPort{{Protocol: "tcp", PublishedPort: 8080}}, StorageMounts: []status.StorageMount{{Type: "volume", Source: "database-cache", Target: "/cache", NodeLocal: true}, {Type: "bind", Source: "/srv/database", Target: "/etc/database"}, {Type: "volume", Source: "plugin-data", Target: "/plugin"}, {Type: "volume", Source: "shared-data", Target: "/shared"}, {Type: "volume", Source: "database-data", Target: "/var/lib/database", NodeLocal: true}}},
 			{ID: "s3", Name: "agent", Mode: "global", RunningTasks: 3, DesiredTasks: 3, Converged: true},
 			{ID: "s1", Name: "api", Mode: "replicated", RunningTasks: 2, DesiredTasks: 2, Converged: true},
 		},

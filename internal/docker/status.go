@@ -134,6 +134,7 @@ func (i *Inspector) Inspect(ctx context.Context) (status.Result, error) {
 			Converged:            service.ServiceStatus.RunningTasks == service.ServiceStatus.DesiredTasks,
 			ForceUpdate:          service.Spec.TaskTemplate.ForceUpdate,
 			PlacementConstraints: placementConstraints(service.Spec.TaskTemplate.Placement),
+			PlacementPreferences: placementPreferences(service.Spec.TaskTemplate.Placement),
 			RequiredPlatforms:    requiredPlatforms(service.Spec.TaskTemplate.Placement),
 			Reservations:         resourceReservations(service.Spec.TaskTemplate.Resources),
 			MaxReplicasPerNode:   maxReplicasPerNode(service.Spec.TaskTemplate.Placement),
@@ -217,6 +218,21 @@ func placementConstraints(placement *swarm.Placement) []string {
 		return nil
 	}
 	return append([]string(nil), placement.Constraints...)
+}
+
+func placementPreferences(placement *swarm.Placement) []string {
+	if placement == nil {
+		return nil
+	}
+	preferences := make([]string, 0, len(placement.Preferences))
+	for _, preference := range placement.Preferences {
+		if preference.Spread == nil {
+			preferences = append(preferences, "unsupported")
+			continue
+		}
+		preferences = append(preferences, "spread="+preference.Spread.SpreadDescriptor)
+	}
+	return preferences
 }
 
 func requiredPlatforms(placement *swarm.Placement) []status.Platform {

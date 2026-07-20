@@ -19,6 +19,7 @@ import (
 	"github.com/ebaldebo/skepr/internal/maintenance"
 	"github.com/ebaldebo/skepr/internal/operations"
 	"github.com/ebaldebo/skepr/internal/preflight"
+	"github.com/ebaldebo/skepr/internal/rebalance"
 	"github.com/ebaldebo/skepr/internal/status"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/swarm"
@@ -70,6 +71,16 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	}
 	assert.Equal(t, 3, managerCount)
 	assert.Equal(t, 2, workerCount)
+
+	var rebalanceOutput bytes.Buffer
+	var rebalanceErrors bytes.Buffer
+	exitCode = cli.Run(context.Background(), []string{"rebalance", "report", "--json"}, connector, &rebalanceOutput, &rebalanceErrors)
+	require.Equal(t, cli.ExitSuccess, exitCode, rebalanceErrors.String())
+	var rebalanceReport rebalance.Report
+	require.NoError(t, json.Unmarshal(rebalanceOutput.Bytes(), &rebalanceReport))
+	assert.Equal(t, rebalance.SchemaVersion, rebalanceReport.SchemaVersion)
+	assert.Equal(t, health.Cluster.ID, rebalanceReport.ClusterID)
+	assert.Zero(t, rebalanceReport.Summary.Opportunities)
 
 	var previewOutput bytes.Buffer
 	var previewErrors bytes.Buffer

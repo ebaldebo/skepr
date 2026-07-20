@@ -13,6 +13,7 @@ import (
 
 	"github.com/ebaldebo/skepr/internal/maintenance"
 	"github.com/ebaldebo/skepr/internal/operations"
+	"github.com/ebaldebo/skepr/internal/rebalance"
 	"github.com/ebaldebo/skepr/internal/status"
 )
 
@@ -45,12 +46,133 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 		return runService(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "node":
 		return runNode(ctx, args[1:], *contextName, connector, stdout, stderr)
+	case "rebalance":
+		return runRebalance(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "maintenance":
 		return runMaintenance(ctx, args[1:], *contextName, connector, stdout, stderr)
 	default:
 		report(stderr, "usage: skepr [--context name] <command>\n")
 		return ExitInvalidUsage
 	}
+}
+
+func runRebalance(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "report" {
+		report(stderr, "usage: skepr [--context name] rebalance report [--check] [--json]\n")
+		return ExitInvalidUsage
+	}
+	flags := flag.NewFlagSet("rebalance report", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	check := flags.Bool("check", false, "return a nonzero exit code when opportunities exist")
+	jsonOutput := flags.Bool("json", false, "emit JSON output")
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+		if err == nil {
+			report(stderr, "usage: skepr [--context name] rebalance report [--check] [--json]\n")
+		}
+		return ExitInvalidUsage
+	}
+
+	connection, err := connector.Connect(ctx, contextName)
+	if err != nil {
+		report(stderr, "configure Docker connection: %v\n", err)
+		return ExitDockerConnection
+	}
+	defer func() { _ = connection.Close() }()
+	inventory, err := connection.Inspect(ctx)
+	if err != nil {
+		report(stderr, "inspect Docker Swarm: %v\n", err)
+		return ExitDockerConnection
+	}
+	if inventory.Cluster.LocalState != "active" || !inventory.Cluster.ControlAvailable {
+		report(stderr, "rebalance report requires active Swarm manager control\n")
+		return ExitSafetyGate
+	}
+	result := rebalance.BuildReport(inventory)
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			report(stderr, "write rebalance report output: %v\n", err)
+			return ExitDockerConnection
+		}
+	} else if err := writeRebalanceReport(stdout, result); err != nil {
+		report(stderr, "write rebalance report output: %v\n", err)
+		return ExitDockerConnection
+	}
+	if *check && result.Summary.Opportunities > 0 {
+		return ExitSafetyGate
+	}
+	return ExitSuccess
+}
+
+func writeRebalanceReport(writer io.Writer, result rebalance.Report) error {
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "REBALANCE OPPORTUNITIES: %d\n", result.Summary.Opportunities)
+	_, _ = fmt.Fprintf(&output, "Assessed replicated services: %d\n", result.Summary.AssessedServices)
+	_, _ = fmt.Fprintf(&output, "Not assessed services: %d\n", result.Summary.NotAssessedServices)
+	writeRebalanceServiceSection(&output, "Opportunities", result.Services, rebalance.StateOpportunity)
+	writeRebalanceServiceSection(&output, "Constrained", result.Services, rebalance.StateConstrained)
+	writeRebalanceServiceSection(&output, "No opportunity", result.Services, rebalance.StateNoOpportunity)
+	writeRebalanceServiceSection(&output, "Not assessed", result.Services, rebalance.StateNotAssessed)
+	_, err := io.WriteString(writer, output.String())
+	return err
+}
+
+func writeRebalanceServiceSection(output *strings.Builder, heading string, services []rebalance.ServiceAssessment, state string) {
+	wroteHeading := false
+	for _, service := range services {
+		if service.State != state {
+			continue
+		}
+		if !wroteHeading {
+			_, _ = fmt.Fprintf(output, "\n%s:\n", heading)
+			wroteHeading = true
+		}
+		if state == rebalance.StateNotAssessed {
+			_, _ = fmt.Fprintf(output, "  %s: %s\n", service.Name, service.Reason)
+			continue
+		}
+		_, _ = fmt.Fprintf(output, "  %s: %d replicas, skew %d\n", service.Name, service.Replicas, service.Skew)
+		_, _ = fmt.Fprintf(output, "    distribution: %s\n", formatNodeTaskCounts(service.Distribution))
+		if state == rebalance.StateOpportunity {
+			_, _ = fmt.Fprintf(output, "    overloaded nodes: %s\n", formatNodeNames(service.OverloadedNodes))
+			_, _ = fmt.Fprintf(output, "    known eligible destinations: %s\n", formatNodeNames(service.KnownEligibleDestinations))
+		}
+		if service.Reason != "" {
+			_, _ = fmt.Fprintf(output, "    reason: %s\n", service.Reason)
+		}
+		if len(service.UnevaluatedInputs) > 0 {
+			inputs := make([]string, 0, len(service.UnevaluatedInputs))
+			for _, input := range service.UnevaluatedInputs {
+				inputs = append(inputs, strings.ReplaceAll(input, "_", " "))
+			}
+			_, _ = fmt.Fprintf(output, "    unevaluated inputs: %s\n", strings.Join(inputs, ", "))
+		}
+		if len(service.StorageWarnings) > 0 {
+			warnings := make([]string, 0, len(service.StorageWarnings))
+			for _, warning := range service.StorageWarnings {
+				warnings = append(warnings, warning.Message)
+			}
+			_, _ = fmt.Fprintf(output, "    storage portability warnings: %s\n", strings.Join(warnings, "; "))
+		}
+	}
+}
+
+func formatNodeTaskCounts(nodes []rebalance.NodeTaskCount) string {
+	values := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		values = append(values, fmt.Sprintf("%s=%d", node.Hostname, node.Tasks))
+	}
+	return strings.Join(values, ", ")
+}
+
+func formatNodeNames(nodes []rebalance.NodeTaskCount) string {
+	values := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		values = append(values, node.Hostname)
+	}
+	return strings.Join(values, ", ")
 }
 
 func runService(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {

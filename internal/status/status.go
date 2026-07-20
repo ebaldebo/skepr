@@ -101,6 +101,7 @@ type Service struct {
 	Converged            bool           `json:"converged"`
 	ForceUpdate          uint64         `json:"-"`
 	PlacementConstraints []string       `json:"-"`
+	PlacementPreferences []string       `json:"-"`
 	RequiredPlatforms    []Platform     `json:"-"`
 	Reservations         Resources      `json:"-"`
 	MaxReplicasPerNode   uint64         `json:"-"`
