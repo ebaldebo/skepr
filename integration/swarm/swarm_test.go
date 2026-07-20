@@ -71,16 +71,6 @@ func TestHealthyFiveNodeSwarm(t *testing.T) {
 	assert.Equal(t, 3, managerCount)
 	assert.Equal(t, 2, workerCount)
 
-	var checkOutput bytes.Buffer
-	var checkErrors bytes.Buffer
-	exitCode = cli.Run(context.Background(), []string{"check", "worker-1"}, connector, &checkOutput, &checkErrors)
-	require.Equal(t, cli.ExitSuccess, exitCode, checkErrors.String())
-	assert.Contains(t, checkOutput.String(), "PASS: Swarm manager manager-1 is healthy")
-	assert.Contains(t, checkOutput.String(), "PASS: Swarm manager manager-2 is healthy")
-	assert.Contains(t, checkOutput.String(), "PASS: Swarm manager manager-3 is healthy")
-	assert.Contains(t, checkOutput.String(), "SAFE: target node worker-1 passed checks")
-	assert.Contains(t, checkOutput.String(), "Target workloads: 0 desired-running tasks across 0 affected services")
-
 	var previewOutput bytes.Buffer
 	var previewErrors bytes.Buffer
 	exitCode = cli.Run(context.Background(), []string{"node", "drain", "worker-1", "--dry-run", "--json"}, connector, &previewOutput, &previewErrors)

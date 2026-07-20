@@ -43,7 +43,7 @@ func TestNodeDrainDryRunReportsImpactAndKnownBlockers(t *testing.T) {
 		},
 	}
 	var stdout bytes.Buffer
-	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1", "--dry-run"}, &fakeConnector{connection: checkInspector{result: inventory}}, &stdout, &bytes.Buffer{})
+	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1", "--dry-run"}, &fakeConnector{connection: nodeInspector{result: inventory}}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, ExitSafetyGate, exitCode)
 	assert.Equal(t, `DRAIN BLOCKED: worker-1
@@ -101,7 +101,7 @@ func TestNodeDrainDryRunJSONOutput(t *testing.T) {
 		},
 	}
 	var stdout bytes.Buffer
-	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1", "--dry-run", "--json"}, &fakeConnector{connection: checkInspector{result: inventory}}, &stdout, &bytes.Buffer{})
+	exitCode := Run(context.Background(), []string{"node", "drain", "worker-1", "--dry-run", "--json"}, &fakeConnector{connection: nodeInspector{result: inventory}}, &stdout, &bytes.Buffer{})
 
 	assert.Equal(t, ExitSuccess, exitCode)
 	assert.JSONEq(t, `{
@@ -358,6 +358,16 @@ type nodeDrainConnection struct {
 	updates      []nodeAvailabilityUpdate
 	updateErr    error
 }
+
+type nodeInspector struct {
+	result status.Result
+}
+
+func (i nodeInspector) Inspect(context.Context) (status.Result, error) {
+	return i.result, nil
+}
+
+func (nodeInspector) Close() error { return nil }
 
 type nodeAvailabilityUpdate struct {
 	nodeID       string

@@ -46,8 +46,6 @@ func Run(ctx context.Context, args []string, connector status.Connector, stdout,
 		return runService(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "node":
 		return runNode(ctx, args[1:], *contextName, connector, stdout, stderr)
-	case "check":
-		return runCheck(ctx, args[1:], *contextName, connector, stdout, stderr)
 	case "maintenance":
 		return runMaintenance(ctx, args[1:], *contextName, connector, stdout, stderr)
 	default:
@@ -789,117 +787,6 @@ func runStatus(ctx context.Context, args []string, contextName string, connector
 		return ExitSafetyGate
 	}
 	return ExitSuccess
-}
-
-func runCheck(ctx context.Context, args []string, contextName string, connector status.Connector, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("check", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	jsonOutput := flags.Bool("json", false, "emit JSON output")
-	if len(args) == 2 && args[1] == "--json" {
-		args = []string{"--json", args[0]}
-	}
-	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
-		if err == nil {
-			report(stderr, "usage: skepr [--context name] check <node> [--json]\n")
-		}
-		return ExitInvalidUsage
-	}
-
-	connection, err := connector.Connect(ctx, contextName)
-	if err != nil {
-		report(stderr, "configure Docker connection: %v\n", err)
-		return ExitDockerConnection
-	}
-	defer func() { _ = connection.Close() }()
-
-	inventory, err := connection.Inspect(ctx)
-	if err != nil {
-		report(stderr, "inspect Docker Swarm: %v\n", err)
-		return ExitDockerConnection
-	}
-	result := preflight.CheckNode(inventory, flags.Arg(0))
-	if *jsonOutput {
-		encoder := json.NewEncoder(stdout)
-		encoder.SetEscapeHTML(false)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(result); err != nil {
-			report(stderr, "write check output: %v\n", err)
-			return ExitDockerConnection
-		}
-		if !result.Safe {
-			return ExitSafetyGate
-		}
-		return ExitSuccess
-	}
-	for _, finding := range result.Findings {
-		if finding.Level != preflight.LevelBlocker {
-			continue
-		}
-		_, _ = fmt.Fprintf(stdout, "%s: %s\n", strings.ToUpper(string(finding.Level)), finding.Message)
-	}
-	for _, finding := range result.Findings {
-		if finding.Level == preflight.LevelBlocker {
-			continue
-		}
-		_, _ = fmt.Fprintf(stdout, "%s: %s\n", strings.ToUpper(string(finding.Level)), finding.Message)
-	}
-	if !result.Safe {
-		targetName := result.RequestedNode
-		if result.Target != nil {
-			targetName = result.Target.Hostname
-		}
-		_, _ = fmt.Fprintf(stdout, "UNSAFE: target node %s failed checks\n", targetName)
-		writeTargetWorkload(stdout, result.TargetWorkload)
-		return ExitSafetyGate
-	}
-	_, _ = fmt.Fprintf(stdout, "SAFE: target node %s passed checks\n", result.Target.Hostname)
-	writeTargetWorkload(stdout, result.TargetWorkload)
-	return ExitSuccess
-}
-
-func writeTargetWorkload(writer io.Writer, workload *preflight.TargetWorkload) {
-	if workload == nil {
-		return
-	}
-
-	taskNoun := "tasks"
-	if workload.DesiredRunningTaskCount == 1 {
-		taskNoun = "task"
-	}
-	serviceNoun := "services"
-	if len(workload.AffectedServices) == 1 {
-		serviceNoun = "service"
-	}
-	_, _ = fmt.Fprintf(
-		writer,
-		"\nTarget workloads: %d desired-running %s across %d affected %s\n",
-		workload.DesiredRunningTaskCount,
-		taskNoun,
-		len(workload.AffectedServices),
-		serviceNoun,
-	)
-	if len(workload.Tasks) == 0 {
-		return
-	}
-
-	table := tabwriter.NewWriter(writer, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(table, "  TASK NAME\tTASK ID\tSERVICE\tSERVICE ID\tSTATE")
-	for _, task := range workload.Tasks {
-		_, _ = fmt.Fprintf(table, "  %s\t%s\t%s\t%s\t%s\n", task.Name, task.ID, task.Service, task.ServiceID, task.State)
-	}
-	_ = table.Flush()
-
-	_, _ = fmt.Fprintln(writer, "\nAffected services:")
-	table = tabwriter.NewWriter(writer, 0, 2, 2, ' ', 0)
-	_, _ = fmt.Fprintln(table, "  SERVICE NAME\tSERVICE ID\tCLASS\tRUNNING/DESIRED")
-	for _, service := range workload.AffectedServices {
-		class := service.Mode
-		if service.Singleton {
-			class = "singleton"
-		}
-		_, _ = fmt.Fprintf(table, "  %s\t%s\t%s\t%d/%d\n", service.Name, service.ID, class, service.RunningTasks, service.DesiredTasks)
-	}
-	_ = table.Flush()
 }
 
 func report(writer io.Writer, format string, args ...any) {
